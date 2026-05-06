@@ -85,6 +85,15 @@ else
   workdir_in="/workspace"
 fi
 
+base_name="ccc-$(basename -- "$host_pwd")"
+base_name="${base_name//[^a-zA-Z0-9_.-]/_}"
+container_name="$base_name"
+n=1
+while docker container inspect "$container_name" >/dev/null 2>&1; do
+  container_name="${base_name}_${n}"
+  n=$((n + 1))
+done
+
 mkdir -p \
   "$HOME/.claude" \
   "$HOME/go/pkg" \
@@ -94,6 +103,7 @@ mkdir -p \
 
 docker_args=(
   --rm
+  --name "$container_name"
   -v "$mount_src:/workspace"
   -v "$HOME/.claude:/home/dev/.claude"
   -v "$HOME/go/pkg:/home/dev/go/pkg"
