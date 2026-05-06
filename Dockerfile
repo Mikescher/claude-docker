@@ -27,6 +27,10 @@ RUN pacman -Syu --noconfirm --needed \
  && pacman -Scc --noconfirm \
  && rm -rf /var/cache/pacman/pkg/* /var/lib/pacman/sync/*
 
+ARG MONGO_TOOLS_VERSION=100.16.1
+RUN curl -fsSL "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-rhel88-x86_64-${MONGO_TOOLS_VERSION}.tgz" \
+    | tar xz -C /usr/local/bin --strip-components=2 --wildcards '*/bin/*'
+
 RUN groupadd -g ${GID} dev \
  && useradd -m -s /bin/bash -u ${UID} -g ${GID} dev \
  && echo 'dev ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/dev \
@@ -45,7 +49,7 @@ RUN mkdir -p \
       /home/dev/go/bin \
       /home/dev/go/pkg
 
-RUN npm install -g typescript ts-node yarn pnpm eslint prettier @angular/cli
+RUN npm install -g typescript ts-node yarn pnpm eslint prettier @angular/cli mongosh
 
 RUN go install honnef.co/go/tools/cmd/staticcheck@latest \
  && go install mvdan.cc/gofumpt@latest

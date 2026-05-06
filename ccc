@@ -12,6 +12,10 @@ Usage: ccc [ccc-flags] [claude-args ...]
 ccc flags (consumed by the wrapper, not forwarded):
   --mount-parent       mount the parent directory at /workspace and set the
                        workdir to /workspace/<basename> so siblings are reachable
+  --net                use a private bridge network instead of the host's
+                       (the default is --network host so host services on
+                       127.0.0.1 — e.g. mongodb on 27017 — are reachable as
+                       localhost from inside the container)
   --no-version-check   skip the upstream version comparison
   --rebuild            run `make build` in the claude-docker checkout first
   --shell              drop into bash inside the container instead of running claude
@@ -27,6 +31,7 @@ EOF
 }
 
 mount_parent=0
+host_net=1
 skip_version_check=0
 do_rebuild=0
 do_shell=0
@@ -35,6 +40,7 @@ forwarded_args=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --mount-parent)     mount_parent=1; shift ;;
+    --net)              host_net=0; shift ;;
     --no-version-check) skip_version_check=1; shift ;;
     --rebuild)          do_rebuild=1; shift ;;
     --shell)            do_shell=1; shift ;;
@@ -97,6 +103,12 @@ docker_args=(
   -w "$workdir_in"
   -e "TERM=${TERM:-xterm-256color}"
 )
+
+if [[ "$host_net" -eq 1 ]]; then
+  docker_args+=( --network host )
+else
+  docker_args+=( --add-host=host.docker.internal:host-gateway )
+fi
 
 [[ -f "$HOME/.claude.json" ]] && docker_args+=( -v "$HOME/.claude.json:/home/dev/.claude.json" )
 [[ -f "$HOME/.gitconfig" ]]   && docker_args+=( -v "$HOME/.gitconfig:/home/dev/.gitconfig:ro" )
