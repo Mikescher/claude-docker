@@ -60,8 +60,37 @@ RUN pipx install black \
  && pipx install pytest \
  && pipx install httpie
 
+ARG NVM_VERSION=v0.40.4
+ENV NVM_DIR=/home/dev/.nvm
+RUN git clone --depth 1 -b ${NVM_VERSION} https://github.com/nvm-sh/nvm.git ${NVM_DIR}
+
+RUN cat >> /home/dev/.bashrc <<'EOF'
+
+# nvm: load the function so it's usable interactively. No version is auto-
+# selected here; activation from .nvmrc happens once at container start
+# (see ccc-entrypoint). NPM_CONFIG_PREFIX is unset because nvm refuses to
+# load when it's set; the pre-installed globals at $NPM_CONFIG_PREFIX/bin
+# stay reachable via PATH regardless.
+unset NPM_CONFIG_PREFIX
+[[ -s "$NVM_DIR/nvm.sh" ]] && . "$NVM_DIR/nvm.sh"
+EOF
+
+RUN cat > /home/dev/.local/bin/ccc-entrypoint <<'EOF' && chmod +x /home/dev/.local/bin/ccc-entrypoint
+#!/usr/bin/env bash
+if [[ -f .nvmrc ]]; then
+  export NVM_DIR="${NVM_DIR:-/home/dev/.nvm}"
+  if [[ -s "$NVM_DIR/nvm.sh" ]]; then
+    unset NPM_CONFIG_PREFIX
+    . "$NVM_DIR/nvm.sh"
+    nvm install || echo "ccc-entrypoint: nvm install failed; falling back to system node" >&2
+  fi
+fi
+exec "$@"
+EOF
+
 RUN curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_VERSION}" \
  && /home/dev/.local/bin/claude --version
 
 WORKDIR /workspace
+ENTRYPOINT ["/home/dev/.local/bin/ccc-entrypoint"]
 CMD ["claude", "--dangerously-skip-permissions"]
