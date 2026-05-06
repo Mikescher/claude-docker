@@ -88,6 +88,9 @@ RUN cat >> /home/${USERNAME}/.bashrc <<'EOF'
 # stay reachable via PATH regardless.
 unset NPM_CONFIG_PREFIX
 [[ -s "$NVM_DIR/nvm.sh" ]] && . "$NVM_DIR/nvm.sh"
+
+# Visual marker so it's obvious which terminal is inside the claude-docker container.
+PS1='[\u@\[\e[91m\]\h\[\e[0m\] \W | \[\e[96m\]\[\e[0m\]  ] '
 EOF
 
 RUN curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_VERSION}" \
