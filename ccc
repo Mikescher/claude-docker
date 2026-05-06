@@ -10,8 +10,9 @@ ccc - run Claude Code in a Docker container
 Usage: ccc [ccc-flags] [claude-args ...]
 
 ccc flags (consumed by the wrapper, not forwarded):
-  --mount-parent       mount the parent directory at /workspace and set the
-                       workdir to /workspace/<basename> so siblings are reachable
+  --mount-parent       mount the parent directory (so siblings are reachable)
+                       instead of just the current directory. The mount target
+                       inside the container always matches the host path.
   --net                use a private bridge network instead of the host's
                        (the default is --network host so host services on
                        127.0.0.1 — e.g. mongodb on 27017 — are reachable as
@@ -79,11 +80,13 @@ fi
 host_pwd="$PWD"
 if [[ "$mount_parent" -eq 1 ]]; then
   mount_src="$(dirname -- "$host_pwd")"
-  workdir_in="/workspace/$(basename -- "$host_pwd")"
 else
   mount_src="$host_pwd"
-  workdir_in="/workspace"
 fi
+workdir_in="$host_pwd"
+
+container_user=$(docker image inspect --format '{{ .Config.User }}' "$IMAGE" 2>/dev/null || true)
+container_home="/home/${container_user:-dev}"
 
 base_name="ccc-$(basename -- "$host_pwd")"
 base_name="${base_name//[^a-zA-Z0-9_.-]/_}"
@@ -104,12 +107,12 @@ mkdir -p \
 docker_args=(
   --rm
   --name "$container_name"
-  -v "$mount_src:/workspace"
-  -v "$HOME/.claude:/home/dev/.claude"
-  -v "$HOME/go/pkg:/home/dev/go/pkg"
-  -v "$HOME/.cache/go-build:/home/dev/.cache/go-build"
-  -v "$HOME/.npm:/home/dev/.npm"
-  -v "$HOME/.cache/pip:/home/dev/.cache/pip"
+  -v "$mount_src:$mount_src"
+  -v "$HOME/.claude:$container_home/.claude"
+  -v "$HOME/go/pkg:$container_home/go/pkg"
+  -v "$HOME/.cache/go-build:$container_home/.cache/go-build"
+  -v "$HOME/.npm:$container_home/.npm"
+  -v "$HOME/.cache/pip:$container_home/.cache/pip"
   -w "$workdir_in"
   -e "TERM=${TERM:-xterm-256color}"
 )
@@ -120,11 +123,11 @@ else
   docker_args+=( --add-host=host.docker.internal:host-gateway )
 fi
 
-[[ -f "$HOME/.claude.json" ]] && docker_args+=( -v "$HOME/.claude.json:/home/dev/.claude.json" )
-[[ -f "$HOME/.gitconfig" ]]   && docker_args+=( -v "$HOME/.gitconfig:/home/dev/.gitconfig:ro" )
-[[ -d "$HOME/.ssh" ]]         && docker_args+=( -v "$HOME/.ssh:/home/dev/.ssh:ro" )
-[[ -d "$HOME/.cache/uv" ]]    && docker_args+=( -v "$HOME/.cache/uv:/home/dev/.cache/uv" )
-[[ -d "$HOME/.cargo" ]]       && docker_args+=( -v "$HOME/.cargo:/home/dev/.cargo" )
+[[ -f "$HOME/.claude.json" ]] && docker_args+=( -v "$HOME/.claude.json:$container_home/.claude.json" )
+[[ -f "$HOME/.gitconfig" ]]   && docker_args+=( -v "$HOME/.gitconfig:$container_home/.gitconfig:ro" )
+[[ -d "$HOME/.ssh" ]]         && docker_args+=( -v "$HOME/.ssh:$container_home/.ssh:ro" )
+[[ -d "$HOME/.cache/uv" ]]    && docker_args+=( -v "$HOME/.cache/uv:$container_home/.cache/uv" )
+[[ -d "$HOME/.cargo" ]]       && docker_args+=( -v "$HOME/.cargo:$container_home/.cargo" )
 
 if [[ -t 0 && -t 1 ]]; then
   docker_args+=( -it )

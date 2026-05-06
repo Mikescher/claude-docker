@@ -2,6 +2,7 @@ IMAGE          ?= claude-docker
 CLAUDE_VERSION ?= latest
 UID            := $(shell id -u)
 GID            := $(shell id -g)
+USERNAME       ?= $(shell id -un)
 
 define resolve_and_build
 	VERSION=$$( \
@@ -10,8 +11,9 @@ define resolve_and_build
 	    *) printf '%s' "$(CLAUDE_VERSION)" ;; \
 	  esac); \
 	if [ -z "$$VERSION" ]; then echo "failed to resolve CLAUDE_VERSION=$(CLAUDE_VERSION)" >&2; exit 1; fi; \
-	echo ">> building $(IMAGE) with Claude Code $$VERSION (UID=$(UID), GID=$(GID))"; \
+	echo ">> building $(IMAGE) with Claude Code $$VERSION (USERNAME=$(USERNAME), UID=$(UID), GID=$(GID))"; \
 	docker build $(1) \
+	  --build-arg USERNAME=$(USERNAME) \
 	  --build-arg UID=$(UID) \
 	  --build-arg GID=$(GID) \
 	  --build-arg CLAUDE_VERSION=$$VERSION \
