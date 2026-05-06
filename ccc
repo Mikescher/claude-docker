@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+IMAGE="${CCC_IMAGE:-claude-docker}"
+
+usage() {
+  cat <<'EOF'
+ccc - run Claude Code in a Docker container
+
+Usage: ccc [ccc-flags] [claude-args ...]
+
+ccc flags (consumed by the wrapper, not forwarded):
+  --mount-parent       mount the parent directory at /workspace and set the
+                       workdir to /workspace/<basename> so siblings are reachable
+  --no-version-check   skip the upstream version comparison
+  --rebuild            run `make build` in the claude-docker checkout first
+  --shell              drop into bash inside the container instead of running claude
+  -h, --help           show this help and exit
+
+Anything else is forwarded to `claude` (which always runs with
+--dangerously-skip-permissions). Use `--` to terminate ccc-flag parsing
+explicitly: `ccc --mount-parent -- --print "query"`.
+
+Environment:
+  CCC_IMAGE   override the docker image name (default: claude-docker)
+EOF
+}
+
+mount_parent=0
+skip_version_check=0
+do_rebuild=0
+do_shell=0
+forwarded_args=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --mount-parent)     mount_parent=1; shift ;;
+    --no-version-check) skip_version_check=1; shift ;;
+    --rebuild)          do_rebuild=1; shift ;;
+    --shell)            do_shell=1; shift ;;
+    -h|--help)          usage; exit 0 ;;
+    --)                 shift; forwarded_args+=("$@"); break ;;
+    *)                  forwarded_args+=("$1"); shift ;;
+  esac
+done
+
+script_dir="$(cd -- "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")" &>/dev/null && pwd)"
+
+if [[ "$do_rebuild" -eq 1 ]]; then
+  make -C "$script_dir" build
+fi
+
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+  echo "ccc: image '$IMAGE' not found — run 'make build' in $script_dir first" >&2
+  exit 1
+fi
+
+if [[ "$skip_version_check" -eq 0 && "$do_shell" -eq 0 && -t 0 ]]; then
+  latest=$(curl -fsSL --max-time 1 "https://downloads.claude.ai/claude-code-releases/latest" 2>/dev/null || true)
+  installed=$(docker image inspect --format '{{ index .Config.Labels "claude_version" }}' "$IMAGE" 2>/dev/null || true)
+  if [[ -n "$latest" && -n "$installed" && "$latest" != "$installed" ]]; then
+    printf "Claude Code %s is available (image has %s). Continue? [Y/n] " "$latest" "$installed" >&2
+    read -r answer </dev/tty || answer=""
+    case "${answer,,}" in
+      n|no)
+        echo "aborted — rebuild with: make -C $script_dir build" >&2
+        exit 1
+        ;;
+    esac
+  fi
+fi
+
+host_pwd="$PWD"
+if [[ "$mount_parent" -eq 1 ]]; then
+  mount_src="$(dirname -- "$host_pwd")"
+  workdir_in="/workspace/$(basename -- "$host_pwd")"
+else
+  mount_src="$host_pwd"
+  workdir_in="/workspace"
+fi
+
+mkdir -p \
+  "$HOME/.claude" \
+  "$HOME/go/pkg" \
+  "$HOME/.cache/go-build" \
+  "$HOME/.npm" \
+  "$HOME/.cache/pip"
+
+docker_args=(
+  --rm
+  -v "$mount_src:/workspace"
+  -v "$HOME/.claude:/home/dev/.claude"
+  -v "$HOME/go/pkg:/home/dev/go/pkg"
+  -v "$HOME/.cache/go-build:/home/dev/.cache/go-build"
+  -v "$HOME/.npm:/home/dev/.npm"
+  -v "$HOME/.cache/pip:/home/dev/.cache/pip"
+  -w "$workdir_in"
+  -e "TERM=${TERM:-xterm-256color}"
+)
+
+[[ -f "$HOME/.claude.json" ]] && docker_args+=( -v "$HOME/.claude.json:/home/dev/.claude.json" )
+[[ -f "$HOME/.gitconfig" ]]   && docker_args+=( -v "$HOME/.gitconfig:/home/dev/.gitconfig:ro" )
+[[ -d "$HOME/.ssh" ]]         && docker_args+=( -v "$HOME/.ssh:/home/dev/.ssh:ro" )
+[[ -d "$HOME/.cache/uv" ]]    && docker_args+=( -v "$HOME/.cache/uv:/home/dev/.cache/uv" )
+[[ -d "$HOME/.cargo" ]]       && docker_args+=( -v "$HOME/.cargo:/home/dev/.cargo" )
+
+if [[ -t 0 && -t 1 ]]; then
+  docker_args+=( -it )
+else
+  docker_args+=( -i )
+fi
+
+if [[ "$do_shell" -eq 1 ]]; then
+  exec docker run "${docker_args[@]}" "$IMAGE" bash -l
+else
+  exec docker run "${docker_args[@]}" "$IMAGE" \
+    claude --dangerously-skip-permissions ${forwarded_args[@]+"${forwarded_args[@]}"}
+fi
