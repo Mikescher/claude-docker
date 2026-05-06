@@ -55,6 +55,20 @@ fi
 exec "$@"
 EOF
 
+# notify-send shim: forwards args (NUL-separated) to a FIFO bind-mounted from
+# the host. The host side of ccc runs a tiny bash reader that pipes them into
+# the host's real notify-send. This avoids exposing the dbus session bus to
+# the container — only desktop notifications round-trip, nothing else.
+# If the FIFO is missing (host has no notify-send, or run outside ccc), the
+# shim silently no-ops so callers don't see errors.
+RUN cat > /usr/local/bin/notify-send <<'EOF' && chmod +x /usr/local/bin/notify-send
+#!/usr/bin/env bash
+fifo=/run/ccc-notify.fifo
+[[ -p "$fifo" ]] || exit 0
+[[ $# -eq 0 ]] && exit 0
+printf '%s\0' "$@" > "$fifo" 2>/dev/null || true
+EOF
+
 USER ${USERNAME}
 WORKDIR /home/${USERNAME}
 

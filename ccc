@@ -142,15 +142,46 @@ fi
 [[ -d "$HOME/.cargo" ]]       && docker_args+=( -v "$HOME/.cargo:$container_home/.cargo" )
 [[ -d "$HOME/.nuget" ]]       && docker_args+=( -v "$HOME/.nuget:$container_home/.nuget" )
 
+# notify-send forwarding: container's /usr/local/bin/notify-send (a shim baked
+# into the image) writes NUL-separated args to a FIFO. Here we create the FIFO
+# on the host, bind-mount it in, and run a tiny background bash reader that
+# pipes each notification into the host's real notify-send. Only this single
+# named pipe crosses the container boundary — no dbus socket is exposed.
+notify_pid=""
+notify_dir=""
+cleanup_notify() {
+  [[ -n "$notify_pid" ]] && kill "$notify_pid" 2>/dev/null || true
+  [[ -n "$notify_dir" ]] && rm -rf "$notify_dir"
+}
+if command -v notify-send >/dev/null 2>&1; then
+  notify_dir="$(mktemp -d --tmpdir ccc-notify-XXXXXX)"
+  notify_fifo="$notify_dir/fifo"
+  mkfifo -m 600 "$notify_fifo"
+  (
+    while :; do
+      args=()
+      mapfile -d '' args < "$notify_fifo" || break
+      [[ ${#args[@]} -eq 0 ]] && continue
+      notify-send "${args[@]}" >/dev/null 2>&1 || true
+    done
+  ) &
+  notify_pid=$!
+  trap cleanup_notify EXIT
+  docker_args+=( -v "$notify_fifo:/run/ccc-notify.fifo" )
+fi
+
 if [[ -t 0 && -t 1 ]]; then
   docker_args+=( -it )
 else
   docker_args+=( -i )
 fi
 
+# Non-exec so the EXIT trap runs after docker exits (notify forwarder cleanup).
+rc=0
 if [[ "$do_shell" -eq 1 ]]; then
-  exec docker run "${docker_args[@]}" "$IMAGE" bash -l
+  docker run "${docker_args[@]}" "$IMAGE" bash -l || rc=$?
 else
-  exec docker run "${docker_args[@]}" "$IMAGE" \
-    claude --dangerously-skip-permissions ${forwarded_args[@]+"${forwarded_args[@]}"}
+  docker run "${docker_args[@]}" "$IMAGE" \
+    claude --dangerously-skip-permissions ${forwarded_args[@]+"${forwarded_args[@]}"} || rc=$?
 fi
+exit $rc
