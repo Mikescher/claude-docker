@@ -123,11 +123,24 @@ else
   docker_args+=( --add-host=host.docker.internal:host-gateway )
 fi
 
+# Forward the host's docker socket so claude can build/run docker images.
+# This is sibling-container DinD: commands talk to the host daemon, so any
+# bind-mount paths used inside the container are interpreted on the host.
+# The user needs the socket's GID as a supplementary group to access it
+# without sudo; that GID varies per host (commonly 999 or 998), so it's
+# resolved at runtime via --group-add rather than baked into the image.
+if [[ -S /var/run/docker.sock ]]; then
+  docker_args+=( -v /var/run/docker.sock:/var/run/docker.sock )
+  docker_sock_gid=$(stat -c '%g' /var/run/docker.sock)
+  docker_args+=( --group-add "$docker_sock_gid" )
+fi
+
 [[ -f "$HOME/.claude.json" ]] && docker_args+=( -v "$HOME/.claude.json:$container_home/.claude.json" )
 [[ -f "$HOME/.gitconfig" ]]   && docker_args+=( -v "$HOME/.gitconfig:$container_home/.gitconfig:ro" )
 [[ -d "$HOME/.ssh" ]]         && docker_args+=( -v "$HOME/.ssh:$container_home/.ssh:ro" )
 [[ -d "$HOME/.cache/uv" ]]    && docker_args+=( -v "$HOME/.cache/uv:$container_home/.cache/uv" )
 [[ -d "$HOME/.cargo" ]]       && docker_args+=( -v "$HOME/.cargo:$container_home/.cargo" )
+[[ -d "$HOME/.nuget" ]]       && docker_args+=( -v "$HOME/.nuget:$container_home/.nuget" )
 
 if [[ -t 0 && -t 1 ]]; then
   docker_args+=( -it )

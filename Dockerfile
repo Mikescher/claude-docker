@@ -10,6 +10,8 @@ LABEL claude_version="${CLAUDE_VERSION}"
 ENV LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     DISABLE_AUTOUPDATER=1 \
+    DOTNET_CLI_TELEMETRY_OPTOUT=1 \
+    DOTNET_NOLOGO=1 \
     NPM_CONFIG_PREFIX=/home/${USERNAME}/.npm-global \
     GOPATH=/home/${USERNAME}/go \
     PATH=/home/${USERNAME}/.npm-global/bin:/home/${USERNAME}/.local/bin:/home/${USERNAME}/go/bin:/usr/local/bin:/usr/bin:/bin
@@ -20,8 +22,10 @@ RUN pacman -Syu --noconfirm --needed \
         unzip zip tar which man-db bash-completion \
         sudo ca-certificates gnupg \
         cmake pkgconf \
+        docker docker-buildx docker-compose \
         ffmpeg \
         jdk-openjdk \
+        dotnet-sdk \
         go gopls delve golangci-lint \
         nodejs npm bun \
         python python-pip python-pipx \

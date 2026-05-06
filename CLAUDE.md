@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Docker-based wrapper around Claude Code itself. The image bundles a developer toolchain (Go, Node/TS, Python, MongoDB tools, ffmpeg, JDK, …) plus the Claude Code native binary. The `ccc` script in the repo root is the user-facing entry point: it runs `claude --dangerously-skip-permissions` inside the container with the host's CWD bind-mounted at the **same absolute path** inside the container (so `/home/mike/Code/foo` on the host is `/home/mike/Code/foo` in the container — paths in errors, sourcemaps, and IDE projects line up). The script is meant to be symlinked onto `PATH` so `cd <project> && ccc` "just works".
+A Docker-based wrapper around Claude Code itself. The image bundles a developer toolchain (Go, Node/TS, Python, .NET, MongoDB tools, ffmpeg, JDK, Docker CLI, …) plus the Claude Code native binary. The `ccc` script in the repo root is the user-facing entry point: it runs `claude --dangerously-skip-permissions` inside the container with the host's CWD bind-mounted at the **same absolute path** inside the container (so `/home/mike/Code/foo` on the host is `/home/mike/Code/foo` in the container — paths in errors, sourcemaps, and IDE projects line up). The script is meant to be symlinked onto `PATH` so `cd <project> && ccc` "just works".
 
 ## Build / run
 
@@ -28,7 +28,9 @@ The three files form a small system held together by three contracts:
 
 2. **Host USERNAME/UID/GID build-args.** Passed in by the Makefile from `id -un`/`id -u`/`id -g`. The container user is created with the host's name and IDs so files written into the bind-mounted workspace and caches end up owned correctly on the host — no chown dance needed — and `$HOME` inside the container is `/home/<host-username>`, matching the host. Override with `make build USERNAME=foo` if needed. `ccc` resolves the in-container home by reading `Config.User` from the image, so old images built before this change keep working until rebuild.
 
-3. **State mounts.** `~/.claude` (sessions, plugins, settings) and `~/.claude.json` (per-project state) are the two pieces of Claude Code state shared host↔container. The wrapper also forwards `~/.gitconfig` and `~/.ssh` (read-only) and the language caches (Go modules/build, npm, pip, optional `uv`/`cargo`). Hosts paths that don't exist are silently skipped — Docker is not allowed to auto-create them as root.
+3. **State mounts.** `~/.claude` (sessions, plugins, settings) and `~/.claude.json` (per-project state) are the two pieces of Claude Code state shared host↔container. The wrapper also forwards `~/.gitconfig` and `~/.ssh` (read-only) and the language caches (Go modules/build, npm, pip, optional `uv`/`cargo`/`.nuget`). Hosts paths that don't exist are silently skipped — Docker is not allowed to auto-create them as root.
+
+**Docker socket passthrough.** `/var/run/docker.sock` is bind-mounted from host to container when present, and the container user is granted the socket's GID at runtime via `--group-add` (the host docker GID varies, so it can't be baked into the image). This is *sibling-container DinD*: `docker` calls inside `ccc` go to the **host's** daemon, so any sibling container that needs a bind mount expects a **host** path — which is fine in practice because the wrapper's "host path == container path" workspace mount means workspace paths pass through transparently.
 
 **`ccc-entrypoint` runs before every command.** The image sets `ENTRYPOINT ["/usr/local/bin/ccc-entrypoint"]`, so both `claude` (the CMD) and `bash -l` (shell mode) are wrapped. The script is the single bootstrap point: if a `.nvmrc` is present in the workdir at startup it sources nvm and runs `nvm install`, otherwise it just `exec "$@"`s. Anything that needs to happen on every container start regardless of mode belongs here. The path is fixed (not under `$HOME`) because `ENTRYPOINT`'s exec form does not substitute build-args.
 
