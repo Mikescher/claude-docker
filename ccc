@@ -18,7 +18,6 @@ ccc flags (consumed by the wrapper, not forwarded):
                        127.0.0.1 — e.g. mongodb on 27017 — are reachable as
                        localhost from inside the container)
   --no-version-check   skip the upstream version comparison
-  --rebuild            run `make build` in the claude-docker checkout first
   --shell              drop into bash inside the container instead of running claude
   -h, --help           show this help and exit
 
@@ -34,7 +33,6 @@ EOF
 mount_parent=0
 host_net=1
 skip_version_check=0
-do_rebuild=0
 do_shell=0
 forwarded_args=()
 
@@ -43,7 +41,6 @@ while [[ $# -gt 0 ]]; do
     --mount-parent)     mount_parent=1; shift ;;
     --net)              host_net=0; shift ;;
     --no-version-check) skip_version_check=1; shift ;;
-    --rebuild)          do_rebuild=1; shift ;;
     --shell)            do_shell=1; shift ;;
     -h|--help)          usage; exit 0 ;;
     --)                 shift; forwarded_args+=("$@"); break ;;
@@ -52,10 +49,6 @@ while [[ $# -gt 0 ]]; do
 done
 
 script_dir="$(cd -- "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")" &>/dev/null && pwd)"
-
-if [[ "$do_rebuild" -eq 1 ]]; then
-  make -C "$script_dir" build
-fi
 
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
   echo "ccc: image '$IMAGE' not found — run 'make build' in $script_dir first" >&2
@@ -70,7 +63,7 @@ if [[ "$skip_version_check" -eq 0 && "$do_shell" -eq 0 && -t 0 ]]; then
     read -r answer </dev/tty || answer=""
     case "${answer,,}" in
       n|no)
-        echo "aborted — rebuild with: make -C $script_dir build" >&2
+        echo "aborted" >&2
         exit 1
         ;;
     esac

@@ -11,7 +11,6 @@ A Docker-based wrapper around Claude Code itself. The image bundles a developer 
 | Command                                | Purpose                                                       |
 |----------------------------------------|---------------------------------------------------------------|
 | `make build`                           | Build the `claude-docker` image at the current `latest` Claude Code version |
-| `make rebuild`                         | Same with `--no-cache`                                        |
 | `make build CLAUDE_VERSION=2.1.131`    | Pin a specific Claude Code version                            |
 | `make build CLAUDE_VERSION=stable`     | Track the stable channel                                      |
 | `bash -n ccc`                          | Syntax-check the wrapper                                      |
