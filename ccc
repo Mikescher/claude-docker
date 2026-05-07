@@ -18,6 +18,10 @@ ccc flags (consumed by the wrapper, not forwarded):
                        127.0.0.1 — e.g. mongodb on 27017 — are reachable as
                        localhost from inside the container)
   --no-version-check   skip the upstream version comparison
+  --no-docker          do not forward the host's docker socket
+  --no-cache           do not mount the language cache directories
+                       (~/go/pkg, ~/.cache/go-build, ~/.npm, ~/.cache/pip,
+                       ~/.cache/uv, ~/.cargo, ~/.nuget)
   --shell              drop into bash inside the container instead of running claude
   -h, --help           show this help and exit
 
@@ -34,6 +38,8 @@ mount_parent=0
 host_net=1
 skip_version_check=0
 do_shell=0
+mount_docker=1
+mount_cache=1
 forwarded_args=()
 
 while [[ $# -gt 0 ]]; do
@@ -41,6 +47,8 @@ while [[ $# -gt 0 ]]; do
     --mount-parent)     mount_parent=1; shift ;;
     --net)              host_net=0; shift ;;
     --no-version-check) skip_version_check=1; shift ;;
+    --no-docker)        mount_docker=0; shift ;;
+    --no-cache)         mount_cache=0; shift ;;
     --shell)            do_shell=1; shift ;;
     -h|--help)          usage; exit 0 ;;
     --)                 shift; forwarded_args+=("$@"); break ;;
@@ -90,25 +98,23 @@ while docker container inspect "$container_name" >/dev/null 2>&1; do
   n=$((n + 1))
 done
 
-mkdir -p \
-  "$HOME/.claude" \
-  "$HOME/go/pkg" \
-  "$HOME/.cache/go-build" \
-  "$HOME/.npm" \
-  "$HOME/.cache/pip"
+mkdir -p "$HOME/.claude"
 
 docker_args=(
   --rm
   --name "$container_name"
   -v "$mount_src:$mount_src"
   -v "$HOME/.claude:$container_home/.claude"
-  -v "$HOME/go/pkg:$container_home/go/pkg"
-  -v "$HOME/.cache/go-build:$container_home/.cache/go-build"
-  -v "$HOME/.npm:$container_home/.npm"
-  -v "$HOME/.cache/pip:$container_home/.cache/pip"
   -w "$workdir_in"
   -e "TERM=${TERM:-xterm-256color}"
 )
+
+if [[ "$mount_cache" -eq 1 ]]; then
+  [[ -d "$HOME/go/pkg" ]]          && docker_args+=( -v "$HOME/go/pkg:$container_home/go/pkg" )
+  [[ -d "$HOME/.cache/go-build" ]] && docker_args+=( -v "$HOME/.cache/go-build:$container_home/.cache/go-build" )
+  [[ -d "$HOME/.npm" ]]            && docker_args+=( -v "$HOME/.npm:$container_home/.npm" )
+  [[ -d "$HOME/.cache/pip" ]]      && docker_args+=( -v "$HOME/.cache/pip:$container_home/.cache/pip" )
+fi
 
 if [[ "$host_net" -eq 1 ]]; then
   docker_args+=( --network host )
@@ -122,7 +128,7 @@ fi
 # The user needs the socket's GID as a supplementary group to access it
 # without sudo; that GID varies per host (commonly 999 or 998), so it's
 # resolved at runtime via --group-add rather than baked into the image.
-if [[ -S /var/run/docker.sock ]]; then
+if [[ "$mount_docker" -eq 1 && -S /var/run/docker.sock ]]; then
   docker_args+=( -v /var/run/docker.sock:/var/run/docker.sock )
   docker_sock_gid=$(stat -c '%g' /var/run/docker.sock)
   docker_args+=( --group-add "$docker_sock_gid" )
@@ -131,9 +137,11 @@ fi
 [[ -f "$HOME/.claude.json" ]] && docker_args+=( -v "$HOME/.claude.json:$container_home/.claude.json" )
 [[ -f "$HOME/.gitconfig" ]]   && docker_args+=( -v "$HOME/.gitconfig:$container_home/.gitconfig:ro" )
 [[ -d "$HOME/.ssh" ]]         && docker_args+=( -v "$HOME/.ssh:$container_home/.ssh:ro" )
-[[ -d "$HOME/.cache/uv" ]]    && docker_args+=( -v "$HOME/.cache/uv:$container_home/.cache/uv" )
-[[ -d "$HOME/.cargo" ]]       && docker_args+=( -v "$HOME/.cargo:$container_home/.cargo" )
-[[ -d "$HOME/.nuget" ]]       && docker_args+=( -v "$HOME/.nuget:$container_home/.nuget" )
+if [[ "$mount_cache" -eq 1 ]]; then
+  [[ -d "$HOME/.cache/uv" ]]  && docker_args+=( -v "$HOME/.cache/uv:$container_home/.cache/uv" )
+  [[ -d "$HOME/.cargo" ]]     && docker_args+=( -v "$HOME/.cargo:$container_home/.cargo" )
+  [[ -d "$HOME/.nuget" ]]     && docker_args+=( -v "$HOME/.nuget:$container_home/.nuget" )
+fi
 
 # notify-send forwarding: container's /usr/local/bin/notify-send (a shim baked
 # into the image) writes NUL-separated args to a FIFO. Here we create the FIFO
