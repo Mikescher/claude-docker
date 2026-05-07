@@ -104,10 +104,13 @@ docker_args=(
   --rm
   --name "$container_name"
   -v "$mount_src:$mount_src"
-  -v "$HOME/.claude:$container_home/.claude"
   -w "$workdir_in"
   -e "TERM=${TERM:-xterm-256color}"
 )
+
+docker_args+=( -v "$HOME/.claude:$container_home/.claude" )
+
+[[ -f "$HOME/.claude.json" ]] && docker_args+=( -v "$HOME/.claude.json:$container_home/.claude.json" )
 
 if [[ "$mount_cache" -eq 1 ]]; then
   [[ -d "$HOME/go/pkg" ]]          && docker_args+=( -v "$HOME/go/pkg:$container_home/go/pkg" )
@@ -134,9 +137,13 @@ if [[ "$mount_docker" -eq 1 && -S /var/run/docker.sock ]]; then
   docker_args+=( --group-add "$docker_sock_gid" )
 fi
 
-[[ -f "$HOME/.claude.json" ]] && docker_args+=( -v "$HOME/.claude.json:$container_home/.claude.json" )
 [[ -f "$HOME/.gitconfig" ]]   && docker_args+=( -v "$HOME/.gitconfig:$container_home/.gitconfig:ro" )
-[[ -d "$HOME/.ssh" ]]         && docker_args+=( -v "$HOME/.ssh:$container_home/.ssh:ro" )
+
+[[ -f /etc/vimrc ]]           && docker_args+=( -v "/etc/vimrc:/etc/vimrc:ro" )
+[[ -f /etc/vim/vimrc ]]       && docker_args+=( -v "/etc/vim/vimrc:/etc/vim/vimrc:ro" )
+[[ -f "$HOME/.vimrc" ]]       && docker_args+=( -v "$HOME/.vimrc:$container_home/.vimrc:ro" )
+[[ -d "$HOME/.vim" ]]         && docker_args+=( -v "$HOME/.vim:$container_home/.vim:ro" )
+
 if [[ "$mount_cache" -eq 1 ]]; then
   [[ -d "$HOME/.cache/uv" ]]  && docker_args+=( -v "$HOME/.cache/uv:$container_home/.cache/uv" )
   [[ -d "$HOME/.cargo" ]]     && docker_args+=( -v "$HOME/.cargo:$container_home/.cargo" )

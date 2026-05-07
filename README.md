@@ -10,7 +10,7 @@ A small helper script which allows me to quickly start a containerized claude co
 
 ## Installed tools
 
-- basics (fit, curl, ffmpeg, make, )
+- basics (git, curl, ffmpeg, make, ...)
 - golang development tools
 - dotnet development tools
 - java
