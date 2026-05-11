@@ -144,6 +144,8 @@ fi
 [[ -f "$HOME/.vimrc" ]]       && docker_args+=( -v "$HOME/.vimrc:$container_home/.vimrc:ro" )
 [[ -d "$HOME/.vim" ]]         && docker_args+=( -v "$HOME/.vim:$container_home/.vim:ro" )
 
+[[ -d "$HOME/.jdks" ]]         && docker_args+=( -v "$HOME/.jdks:$container_home/.jdks" )
+
 if [[ "$mount_cache" -eq 1 ]]; then
   [[ -d "$HOME/.cache/uv" ]]  && docker_args+=( -v "$HOME/.cache/uv:$container_home/.cache/uv" )
   [[ -d "$HOME/.cargo" ]]     && docker_args+=( -v "$HOME/.cargo:$container_home/.cargo" )
