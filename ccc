@@ -149,6 +149,24 @@ fi
 
 [[ -d "$HOME/.jdks" ]]         && docker_args+=( -v "$HOME/.jdks:$container_home/.jdks:ro" )
 
+# Wayland clipboard forwarding: claude code's image-paste path shells out to
+# `wl-paste --type image/png` (et al.). Bind-mount just the single wayland
+# socket — not the rest of $XDG_RUNTIME_DIR — so wl-paste reaches the host
+# compositor without also exposing dbus, pulse, gvfs, etc. Container UID
+# matches host UID via build-arg, so socket ownership lines up. libwayland
+# warns that $XDG_RUNTIME_DIR isn't 0700 (Docker auto-creates the parent as
+# root:root 0755) but still connects.
+if [[ -n "${WAYLAND_DISPLAY:-}" && -n "${XDG_RUNTIME_DIR:-}" ]]; then
+  wayland_sock="$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY"
+  if [[ -S "$wayland_sock" ]]; then
+    docker_args+=(
+      -v "$wayland_sock:$wayland_sock"
+      -e "WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
+      -e "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR"
+    )
+  fi
+fi
+
 if [[ "$mount_cache" -eq 1 ]]; then
   [[ -d "$HOME/.cache/uv" ]]  && docker_args+=( -v "$HOME/.cache/uv:$container_home/.cache/uv" )
   [[ -d "$HOME/.cargo" ]]     && docker_args+=( -v "$HOME/.cargo:$container_home/.cargo" )

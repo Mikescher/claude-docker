@@ -24,7 +24,7 @@ RUN pacman -Syu --noconfirm --needed \
         sudo ca-certificates gnupg \
         cmake pkgconf \
         docker docker-buildx docker-compose \
-        ffmpeg \
+        ffmpeg wl-clipboard \
         jdk-openjdk jdk11-openjdk ant \
         dotnet-sdk \
         go gopls delve golangci-lint \
