@@ -25,7 +25,7 @@ RUN pacman -Syu --noconfirm --needed \
         cmake pkgconf \
         docker docker-buildx docker-compose \
         ffmpeg \
-        jdk-openjdk \
+        jdk-openjdk ant \
         dotnet-sdk \
         go gopls delve golangci-lint \
         nodejs npm bun \
