@@ -25,13 +25,12 @@ RUN pacman -Syu --noconfirm --needed \
         cmake pkgconf \
         docker docker-buildx docker-compose \
         ffmpeg \
-        jdk-openjdk ant \
+        jdk-openjdk jdk11-openjdk ant \
         dotnet-sdk \
         go gopls delve golangci-lint \
         nodejs npm bun \
         python python-pip python-pipx \
- && pacman -Scc --noconfirm \
- && rm -rf /var/cache/pacman/pkg/* /var/lib/pacman/sync/*
+ && pacman -Scc --noconfirm
 
 ARG MONGO_TOOLS_VERSION=100.16.1
 RUN curl -fsSL "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-rhel88-x86_64-${MONGO_TOOLS_VERSION}.tgz" \
@@ -72,6 +71,27 @@ EOF
 
 USER ${USERNAME}
 WORKDIR /home/${USERNAME}
+
+# ivy (Apache Ivy) from AUR — not in the official repos. makepkg refuses to
+# run as root, so this has to live after the USER switch; sudo (NOPASSWD)
+# handles the -i install step. The upstream tarball is signed by an Apache
+# Ivy release key that isn't in the base image's keyring; import it from a
+# keyserver so makepkg's PGP check passes (sha256sum is verified either way).
+# Ivy 2.5.3 source references Pack200 (removed in JDK 14) and Thread.stop()
+# (removed in JDK 23), so it has to be *built* against JDK 11; the runtime
+# default stays on the latest jdk-openjdk.
+RUN gpg --keyserver keyserver.ubuntu.com --recv-keys 5BE0BA8CB80602AE \
+ && git clone --depth 1 https://aur.archlinux.org/ivy.git /tmp/ivy \
+ && cd /tmp/ivy \
+ && JAVA_HOME=/usr/lib/jvm/java-11-openjdk \
+    PATH=/usr/lib/jvm/java-11-openjdk/bin:$PATH \
+    makepkg -si --noconfirm \
+ && rm -rf /tmp/ivy
+
+# makepkg -si shelled out to `sudo pacman -U` for ivy, repopulating the
+# pacman cache with root-owned files; this RUN executes as ${USERNAME}, so
+# the cleanup needs sudo (NOPASSWD).
+RUN sudo rm -rf /var/cache/pacman/pkg/* /var/lib/pacman/sync/*
 
 RUN mkdir -p \
       /home/${USERNAME}/.npm-global \

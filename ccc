@@ -117,6 +117,9 @@ if [[ "$mount_cache" -eq 1 ]]; then
   [[ -d "$HOME/.cache/go-build" ]] && docker_args+=( -v "$HOME/.cache/go-build:$container_home/.cache/go-build" )
   [[ -d "$HOME/.npm" ]]            && docker_args+=( -v "$HOME/.npm:$container_home/.npm" )
   [[ -d "$HOME/.cache/pip" ]]      && docker_args+=( -v "$HOME/.cache/pip:$container_home/.cache/pip" )
+  [[ -d "$HOME/.ant" ]]            && docker_args+=( -v "$HOME/.ant:$container_home/.ant" )
+  [[ -d "$HOME/.ivy2" ]]           && docker_args+=( -v "$HOME/.ivy2:$container_home/.ivy2" )
+  [[ -d "/usr/share/ant/lib" ]]    && docker_args+=( -v "/usr/share/ant/lib:/usr/share/ant/lib" )
 fi
 
 if [[ "$host_net" -eq 1 ]]; then
@@ -144,7 +147,7 @@ fi
 [[ -f "$HOME/.vimrc" ]]       && docker_args+=( -v "$HOME/.vimrc:$container_home/.vimrc:ro" )
 [[ -d "$HOME/.vim" ]]         && docker_args+=( -v "$HOME/.vim:$container_home/.vim:ro" )
 
-[[ -d "$HOME/.jdks" ]]         && docker_args+=( -v "$HOME/.jdks:$container_home/.jdks" )
+[[ -d "$HOME/.jdks" ]]         && docker_args+=( -v "$HOME/.jdks:$container_home/.jdks:ro" )
 
 if [[ "$mount_cache" -eq 1 ]]; then
   [[ -d "$HOME/.cache/uv" ]]  && docker_args+=( -v "$HOME/.cache/uv:$container_home/.cache/uv" )
