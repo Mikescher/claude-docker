@@ -52,6 +52,20 @@ if [[ -f .nvmrc ]]; then
     nvm install || echo "ccc-entrypoint: nvm install failed; falling back to system node" >&2
   fi
 fi
+
+# chrome-devtools-mcp ships configured to spawn its own Chrome, which can't
+# work in this container (no display, no chrome binary). Re-point it at a
+# host Chrome reachable on the shared host network — start one with:
+#   google-chrome --remote-debugging-port=9222 --user-data-dir=/tmp/chrome-mcp
+# Idempotent (skips when the flag is already present); re-applies after
+# plugin updates wipe the marketplace cache.
+mcp_cfg="$HOME/.claude/plugins/cache/claude-plugins-official/chrome-devtools-mcp/latest/.claude-plugin/plugin.json"
+if [[ -f "$mcp_cfg" ]] && ! grep -q 'browser-url' "$mcp_cfg"; then
+  tmp=$(mktemp) && jq '.mcpServers["chrome-devtools"].args += ["--browser-url=http://127.0.0.1:9222"]' "$mcp_cfg" > "$tmp" 2>/dev/null \
+    && mv "$tmp" "$mcp_cfg" \
+    || { rm -f "$tmp"; echo "ccc-entrypoint: failed to patch chrome-devtools-mcp config" >&2; }
+fi
+
 exec "$@"
 EOF
 
@@ -89,8 +103,8 @@ RUN gpg --keyserver keyserver.ubuntu.com --recv-keys 5BE0BA8CB80602AE \
  && rm -rf /tmp/ivy
 
 # makepkg -si shelled out to `sudo pacman -U` for ivy, repopulating the
-# pacman cache with root-owned files; this RUN executes as ${USERNAME}, so
-# the cleanup needs sudo (NOPASSWD).
+# pacman cache with root-owned files; this RUN executes as ${USERNAME},
+# so the cleanup needs sudo (NOPASSWD).
 RUN sudo rm -rf /var/cache/pacman/pkg/* /var/lib/pacman/sync/*
 
 RUN mkdir -p \

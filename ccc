@@ -23,6 +23,9 @@ ccc flags (consumed by the wrapper, not forwarded):
                        (~/go/pkg, ~/.cache/go-build, ~/.npm, ~/.cache/pip,
                        ~/.cache/uv, ~/.cargo, ~/.nuget)
   --shell              drop into bash inside the container instead of running claude
+  --chrome             launch google-chrome-stable with --remote-debugging-port=9222
+                       on the host (so chrome-devtools-mcp can attach) if nothing is
+                       already listening on that port
   -h, --help           show this help and exit
 
 Anything else is forwarded to `claude` (which always runs with
@@ -40,6 +43,7 @@ skip_version_check=0
 do_shell=0
 mount_docker=1
 mount_cache=1
+start_chrome=0
 forwarded_args=()
 
 while [[ $# -gt 0 ]]; do
@@ -50,6 +54,7 @@ while [[ $# -gt 0 ]]; do
     --no-docker)        mount_docker=0; shift ;;
     --no-cache)         mount_cache=0; shift ;;
     --shell)            do_shell=1; shift ;;
+    --chrome)           start_chrome=1; shift ;;
     -h|--help)          usage; exit 0 ;;
     --)                 shift; forwarded_args+=("$@"); break ;;
     *)                  forwarded_args+=("$1"); shift ;;
@@ -75,6 +80,17 @@ if [[ "$skip_version_check" -eq 0 && "$do_shell" -eq 0 && -t 0 && -t 1 ]]; then
         exit 1
         ;;
     esac
+  fi
+fi
+
+if [[ "$start_chrome" -eq 1 ]]; then
+  if curl -fsS --max-time 1 http://127.0.0.1:9222/json/version >/dev/null 2>&1; then
+    :
+  elif command -v google-chrome-stable >/dev/null 2>&1; then
+    google-chrome-stable --remote-debugging-port=9222 --user-data-dir=/tmp/chrome-profile-stable >/dev/null 2>&1 &
+    disown
+  else
+    echo "ccc: --chrome requested but google-chrome-stable not found on PATH" >&2
   fi
 fi
 
