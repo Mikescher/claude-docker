@@ -24,12 +24,13 @@ RUN pacman -Syu --noconfirm --needed \
         sudo ca-certificates gnupg \
         cmake pkgconf \
         docker docker-buildx docker-compose \
-        ffmpeg wl-clipboard \
+        ffmpeg wl-clipboard libpulse \
         jdk-openjdk jdk11-openjdk ant \
         dotnet-sdk \
         go gopls delve golangci-lint \
         nodejs npm bun \
         python python-pip python-pipx \
+        php composer \
  && pacman -Scc --noconfirm
 
 ARG MONGO_TOOLS_VERSION=100.16.1
@@ -102,9 +103,21 @@ RUN gpg --keyserver keyserver.ubuntu.com --recv-keys 5BE0BA8CB80602AE \
     makepkg -si --noconfirm \
  && rm -rf /tmp/ivy
 
-# makepkg -si shelled out to `sudo pacman -U` for ivy, repopulating the
-# pacman cache with root-owned files; this RUN executes as ${USERNAME},
-# so the cleanup needs sudo (NOPASSWD).
+# .NET SDK 9.0 from AUR — pulls Microsoft's official tarball and installs
+# side-by-side under /usr/share/dotnet/sdk/<version>/, coexisting with the
+# latest `dotnet-sdk` from the official repo. The git repo is the *pkgbase*
+# (`dotnet-core-9.0-bin`), not the per-package name; one PKGBUILD produces
+# runtime, aspnet-runtime, both targeting-packs, and sdk as split outputs,
+# all installed together by `makepkg -i`. `dotnet-host` and `netstandard-
+# targeting-pack` come in transitively from the official `dotnet-sdk` above.
+RUN git clone --depth 1 https://aur.archlinux.org/dotnet-core-9.0-bin.git /tmp/dotnet-core-9.0-bin \
+ && cd /tmp/dotnet-core-9.0-bin \
+ && makepkg -si --noconfirm \
+ && rm -rf /tmp/dotnet-core-9.0-bin
+
+# makepkg -si shelled out to `sudo pacman -U` for ivy and the dotnet packages,
+# repopulating the pacman cache with root-owned files; this RUN executes as
+# ${USERNAME}, so the cleanup needs sudo (NOPASSWD).
 RUN sudo rm -rf /var/cache/pacman/pkg/* /var/lib/pacman/sync/*
 
 RUN mkdir -p \
