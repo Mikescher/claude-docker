@@ -22,6 +22,11 @@ ccc flags (consumed by the wrapper, not forwarded):
   --no-cache           do not mount the language cache directories
                        (~/go/pkg, ~/.cache/go-build, ~/.npm, ~/.cache/pip,
                        ~/.cache/uv, ~/.cargo, ~/.nuget)
+  --no-cpu-limit       do not constrain the container's CPU count
+                       (default: host CPUs minus 2)
+  --no-memory-limit    do not constrain the container's memory
+                       (default: host RAM minus 8 GiB)
+  --no-limit           shorthand for --no-cpu-limit --no-memory-limit
   --shell              drop into bash inside the container instead of running claude
   --chrome             launch google-chrome-stable with --remote-debugging-port=9222
                        on the host (so chrome-devtools-mcp can attach) if nothing is
@@ -44,6 +49,8 @@ do_shell=0
 mount_docker=1
 mount_cache=1
 start_chrome=0
+limit_cpu=1
+limit_memory=1
 forwarded_args=()
 
 while [[ $# -gt 0 ]]; do
@@ -53,6 +60,9 @@ while [[ $# -gt 0 ]]; do
     --no-version-check) skip_version_check=1; shift ;;
     --no-docker)        mount_docker=0; shift ;;
     --no-cache)         mount_cache=0; shift ;;
+    --no-cpu-limit)     limit_cpu=0; shift ;;
+    --no-memory-limit)  limit_memory=0; shift ;;
+    --no-limit)         limit_cpu=0; limit_memory=0; shift ;;
     --shell)            do_shell=1; shift ;;
     --chrome)           start_chrome=1; shift ;;
     -h|--help)          usage; exit 0 ;;
@@ -142,6 +152,27 @@ if [[ "$host_net" -eq 1 ]]; then
   docker_args+=( --network host )
 else
   docker_args+=( --add-host=host.docker.internal:host-gateway )
+fi
+
+# Resource limits: leave headroom on the host so a runaway build inside the
+# container can't starve the desktop. Defaults are (host CPUs - 2) and
+# (host RAM - 8 GiB); both opt-out via --no-cpu-limit / --no-memory-limit
+# / --no-limit. Skipped silently when the host is too small for the headroom
+# to leave a positive budget.
+if [[ "$limit_cpu" -eq 1 ]]; then
+  host_cpus=$(nproc 2>/dev/null || echo 0)
+  cpu_budget=$(( host_cpus - 2 ))
+  if [[ "$cpu_budget" -gt 0 ]]; then
+    docker_args+=( --cpus="$cpu_budget" )
+  fi
+fi
+if [[ "$limit_memory" -eq 1 ]]; then
+  mem_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+  mem_gib=$(( mem_kb / 1024 / 1024 ))
+  mem_budget=$(( mem_gib - 8 ))
+  if [[ "$mem_budget" -gt 0 ]]; then
+    docker_args+=( --memory="${mem_budget}g" )
+  fi
 fi
 
 # Forward the host's docker socket so claude can build/run docker images.
