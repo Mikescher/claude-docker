@@ -154,6 +154,15 @@ else
   docker_args+=( --add-host=host.docker.internal:host-gateway )
 fi
 
+if [[ "$start_chrome" -eq 1 ]]; then
+
+  # claude mcp add -s user chrome-devtools -- npx chrome-devtools-mcp@latest --browserUrl http://127.0.0.1:9222
+
+  [[ -d "/opt/google/chrome" ]] && docker_args+=( -v "/opt/google/chrome:/opt/google/chrome:ro" )
+
+fi
+
+
 # Resource limits: leave headroom on the host so a runaway build inside the
 # container can't starve the desktop. Defaults are (host CPUs - 2) and
 # (host RAM - 8 GiB); both opt-out via --no-cpu-limit / --no-memory-limit
