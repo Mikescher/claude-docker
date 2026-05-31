@@ -13,19 +13,22 @@ ENV LANG=C.UTF-8 \
     DISABLE_AUTOUPDATER=1 \
     DOTNET_CLI_TELEMETRY_OPTOUT=1 \
     DOTNET_NOLOGO=1 \
+    FLUTTER_SUPPRESS_ANALYTICS=true \
     NPM_CONFIG_PREFIX=/home/${USERNAME}/.npm-global \
     GOPATH=/home/${USERNAME}/go \
-    PATH=/home/${USERNAME}/.npm-global/bin:/home/${USERNAME}/.local/bin:/home/${USERNAME}/go/bin:/usr/local/bin:/usr/bin:/bin
+    ANDROID_HOME=/home/${USERNAME}/Android/Sdk \
+    ANDROID_SDK_ROOT=/home/${USERNAME}/Android/Sdk \
+    PATH=/home/${USERNAME}/.npm-global/bin:/home/${USERNAME}/.local/bin:/home/${USERNAME}/go/bin:/home/${USERNAME}/flutter/bin:/home/${USERNAME}/.pub-cache/bin:/home/${USERNAME}/Android/Sdk/cmdline-tools/latest/bin:/home/${USERNAME}/Android/Sdk/platform-tools:/usr/local/bin:/usr/bin:/bin
 
 RUN pacman -Syu --noconfirm --needed \
         git curl wget openssh \
         ripgrep fd jq tmux less vim nano \
         unzip zip tar which man-db bash-completion \
         sudo ca-certificates gnupg \
-        cmake pkgconf \
+        cmake pkgconf ninja clang gtk3 mesa-utils \
         docker docker-buildx docker-compose \
         ffmpeg wl-clipboard libpulse \
-        jdk-openjdk jdk11-openjdk ant \
+        jdk-openjdk jdk17-openjdk jdk11-openjdk ant \
         dotnet-sdk \
         go gopls delve golangci-lint \
         nodejs npm bun \
@@ -140,6 +143,50 @@ RUN pipx install black \
  && pipx install mypy \
  && pipx install pytest \
  && pipx install httpie
+
+# Android SDK. Google ships the command-line tools as a bare zip that must be
+# relocated to $ANDROID_HOME/cmdline-tools/latest/ for sdkmanager to resolve
+# the rest of the SDK. Licenses are accepted non-interactively at build time
+# so gradle builds don't stall on a prompt. sdkmanager is a Java app and the
+# image's default JDK is newer than it expects, so it's run under JDK 17 (the
+# version the Android Gradle Plugin also wants). The build-number in the
+# cmdline-tools URL is exact — bump it from the newest entry in
+# https://dl.google.com/android/repository/repository2-3.xml when updating.
+# Package names carry a literal `;` (e.g. "platforms;android-36"), a shell
+# metacharacter, so they're quoted here rather than passed through an ARG.
+ARG ANDROID_CMDLINE_TOOLS_VERSION=13114758
+ENV JAVA_17_HOME=/usr/lib/jvm/java-17-openjdk
+RUN curl -fsSL "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_VERSION}_latest.zip" -o /tmp/cmdline-tools.zip \
+ && mkdir -p "$ANDROID_HOME/cmdline-tools" \
+ && unzip -q /tmp/cmdline-tools.zip -d "$ANDROID_HOME/cmdline-tools" \
+ && mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest" \
+ && rm /tmp/cmdline-tools.zip \
+ && yes | JAVA_HOME="$JAVA_17_HOME" sdkmanager --licenses >/dev/null \
+ && JAVA_HOME="$JAVA_17_HOME" sdkmanager \
+      "platform-tools" \
+      "platforms;android-36" "platforms;android-35" \
+      "build-tools;36.0.0" "build-tools;35.0.0" >/dev/null
+
+# Flutter SDK (stable channel). The bundled Dart SDK and the Android build
+# engine are fetched into the SDK's own cache via precache so the first real
+# build is offline-ready — only `--android`, not `--universal`, since the
+# iOS/macOS/Windows/web/Fuchsia engines are dead weight in a Linux/Android
+# container. Flutter is configured to use the JDK 17 install for Android (its
+# Gradle invocations don't support the image's newer default JDK) and the SDK
+# above. It lives under $HOME because flutter writes into its own tree at
+# runtime (bin/cache), which a root-owned /opt install would forbid.
+#
+# precache downloads have no client-side timeout, so a stalled CDN connection
+# would hang the build forever; it's wrapped in timeout+retry and is
+# best-effort (a failed precache just means the first real build re-fetches
+# online), so the loop never fails the layer. `flutter doctor` is the
+# build-time sanity check that the toolchain actually resolves.
+ARG FLUTTER_CHANNEL=stable
+RUN git clone --depth 1 -b ${FLUTTER_CHANNEL} https://github.com/flutter/flutter.git /home/${USERNAME}/flutter \
+ && flutter config --jdk-dir="$JAVA_17_HOME" \
+ && flutter config --android-sdk "$ANDROID_HOME" \
+ && for i in 1 2 3; do timeout 900 flutter precache --android && break || echo "ccc-build: flutter precache attempt $i failed/timed out, retrying"; done \
+ && (timeout 240 flutter doctor || true)
 
 ARG NVM_VERSION=v0.40.4
 ENV NVM_DIR=/home/${USERNAME}/.nvm

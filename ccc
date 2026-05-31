@@ -21,7 +21,7 @@ ccc flags (consumed by the wrapper, not forwarded):
   --no-docker          do not forward the host's docker socket
   --no-cache           do not mount the language cache directories
                        (~/go/pkg, ~/.cache/go-build, ~/.npm, ~/.cache/pip,
-                       ~/.cache/uv, ~/.cargo, ~/.nuget)
+                       ~/.cache/uv, ~/.cargo, ~/.nuget, ~/.gradle, ~/.pub-cache)
   --no-cpu-limit       do not constrain the container's CPU count
                        (default: host CPUs minus 2)
   --no-memory-limit    do not constrain the container's memory
@@ -146,6 +146,8 @@ if [[ "$mount_cache" -eq 1 ]]; then
   [[ -d "$HOME/.ant" ]]            && docker_args+=( -v "$HOME/.ant:$container_home/.ant" )
   [[ -d "$HOME/.ivy2" ]]           && docker_args+=( -v "$HOME/.ivy2:$container_home/.ivy2" )
   [[ -d "/usr/share/ant/lib" ]]    && docker_args+=( -v "/usr/share/ant/lib:/usr/share/ant/lib" )
+  [[ -d "$HOME/.gradle" ]]         && docker_args+=( -v "$HOME/.gradle:$container_home/.gradle" )
+  [[ -d "$HOME/.pub-cache" ]]      && docker_args+=( -v "$HOME/.pub-cache:$container_home/.pub-cache" )
 fi
 
 if [[ "$host_net" -eq 1 ]]; then
