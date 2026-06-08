@@ -10,6 +10,9 @@ ccc - run Claude Code in a Docker container
 Usage: ccc [ccc-flags] [claude-args ...]
 
 ccc flags (consumed by the wrapper, not forwarded):
+  --mount DIR          additionally bind-mount DIR into the container at the
+                       same absolute path (errors if DIR does not exist). May
+                       be given multiple times.
   --mount-parent       mount the parent directory (so siblings are reachable)
                        instead of just the current directory. The mount target
                        inside the container always matches the host path.
@@ -51,10 +54,23 @@ mount_cache=1
 start_chrome=0
 limit_cpu=1
 limit_memory=1
+extra_mounts=()
 forwarded_args=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --mount)
+      if [[ $# -lt 2 ]]; then
+        echo "ccc: --mount requires a directory argument" >&2
+        exit 1
+      fi
+      if [[ ! -d "$2" ]]; then
+        echo "ccc: --mount: directory '$2' does not exist" >&2
+        exit 1
+      fi
+      extra_mounts+=( "$(cd -- "$2" &>/dev/null && pwd)" )
+      shift 2
+      ;;
     --mount-parent)     mount_parent=1; shift ;;
     --net)              host_net=0; shift ;;
     --no-version-check) skip_version_check=1; shift ;;
@@ -133,6 +149,10 @@ docker_args=(
   -w "$workdir_in"
   -e "TERM=${TERM:-xterm-256color}"
 )
+
+for m in ${extra_mounts[@]+"${extra_mounts[@]}"}; do
+  docker_args+=( -v "$m:$m" )
+done
 
 docker_args+=( -v "$HOME/.claude:$container_home/.claude" )
 
