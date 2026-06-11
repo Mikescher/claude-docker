@@ -23,7 +23,7 @@ ccc flags (consumed by the wrapper, not forwarded):
   --no-version-check   skip the upstream version comparison
   --no-docker          do not forward the host's docker socket
   --no-cache           do not mount the language cache directories
-                       (~/go/pkg, ~/.cache/go-build, ~/.npm, ~/.cache/pip,
+                       (~/go/pkg, ~/.cache/go-build, ~/.npm, ~/.nvm, ~/.cache/pip,
                        ~/.cache/uv, ~/.cargo, ~/.nuget, ~/.gradle, ~/.pub-cache)
   --no-cpu-limit       do not constrain the container's CPU count
                        (default: host CPUs minus 2)
@@ -162,6 +162,14 @@ if [[ "$mount_cache" -eq 1 ]]; then
   [[ -d "$HOME/go/pkg" ]]          && docker_args+=( -v "$HOME/go/pkg:$container_home/go/pkg" )
   [[ -d "$HOME/.cache/go-build" ]] && docker_args+=( -v "$HOME/.cache/go-build:$container_home/.cache/go-build" )
   [[ -d "$HOME/.npm" ]]            && docker_args+=( -v "$HOME/.npm:$container_home/.npm" )
+  # nvm: persist downloaded tarballs (.cache) and installed node versions
+  # (versions) so the `.nvmrc` `nvm install` at container start is near-instant
+  # on repeat runs. Unlike the other caches these are mkdir'd rather than
+  # gated on pre-existence, because the dirs must exist for the install to be
+  # captured and reused next time.
+  mkdir -p "$HOME/.nvm/.cache" "$HOME/.nvm/versions"
+  docker_args+=( -v "$HOME/.nvm/.cache:$container_home/.nvm/.cache" )
+  docker_args+=( -v "$HOME/.nvm/versions:$container_home/.nvm/versions" )
   [[ -d "$HOME/.cache/pip" ]]      && docker_args+=( -v "$HOME/.cache/pip:$container_home/.cache/pip" )
   [[ -d "$HOME/.ant" ]]            && docker_args+=( -v "$HOME/.ant:$container_home/.ant" )
   [[ -d "$HOME/.ivy2" ]]           && docker_args+=( -v "$HOME/.ivy2:$container_home/.ivy2" )
