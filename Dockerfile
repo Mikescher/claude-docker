@@ -40,6 +40,23 @@ ARG MONGO_TOOLS_VERSION=100.16.1
 RUN curl -fsSL "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-rhel88-x86_64-${MONGO_TOOLS_VERSION}.tgz" \
     | tar xz -C /usr/local/bin --strip-components=2 --wildcards '*/bin/*'
 
+# Eclipse Temurin 21 (Adoptium). Not in Arch's official repos — only the AUR,
+# which this image has no helper for — so it's fetched as the upstream tarball
+# (same pattern as MongoDB tools / Android cmdline-tools) into the standard
+# /usr/lib/jvm tree so it sits alongside the pacman JDKs. The system default
+# (archlinux-java) is left on jdk-openjdk; reach this build via JAVA_21_HOME.
+# Bump TEMURIN_21_VERSION/SHA256 from api.adoptium.net (feature_releases/21/ga).
+ARG TEMURIN_21_VERSION=21.0.11+10
+ARG TEMURIN_21_SHA256=4b2220e232a97997b436ca6ab15cbf70171ecff52958a46159dfa5a8c44ca4de
+ENV JAVA_21_HOME=/usr/lib/jvm/java-21-temurin
+RUN ver="${TEMURIN_21_VERSION%+*}" build="${TEMURIN_21_VERSION#*+}" \
+ && url="https://github.com/adoptium/temurin21-binaries/releases/download/jdk-${TEMURIN_21_VERSION//+/%2B}/OpenJDK21U-jdk_x64_linux_hotspot_${ver}_${build}.tar.gz" \
+ && curl -fsSL "$url" -o /tmp/temurin21.tar.gz \
+ && echo "${TEMURIN_21_SHA256}  /tmp/temurin21.tar.gz" | sha256sum -c - \
+ && mkdir -p "$JAVA_21_HOME" \
+ && tar xz -C "$JAVA_21_HOME" --strip-components=1 -f /tmp/temurin21.tar.gz \
+ && rm -f /tmp/temurin21.tar.gz
+
 RUN groupadd -g ${GID} ${USERNAME} \
  && useradd -m -s /bin/bash -u ${UID} -g ${GID} ${USERNAME} \
  && echo "${USERNAME} ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/${USERNAME} \
@@ -54,6 +71,32 @@ if [[ -f .nvmrc ]]; then
     unset NPM_CONFIG_PREFIX
     . "$NVM_DIR/nvm.sh"
     nvm install || echo "ccc-entrypoint: nvm install failed; falling back to system node" >&2
+  fi
+fi
+
+# .java-version (jenv/jabba/sdkman convention): switch the active JDK to match,
+# like .nvmrc does for node. Content is a version such as "21", "17", "1.8" or
+# a full "21.0.11" — we match on the *major* version against the JDKs installed
+# under /usr/lib/jvm (java-<major>-openjdk and the Temurin build). On a bad or
+# unmatched version it falls back to the system default, but loudly: an error
+# is printed and the start pauses 2s so the message is seen before claude takes
+# over the terminal.
+if [[ -f .java-version ]]; then
+  jv=$(tr -d '[:space:]' < .java-version)
+  [[ $jv == 1.* ]] && jv=${jv#1.}   # legacy "1.8" -> "8"
+  major=${jv%%.*}
+  jdk=""
+  if [[ -n $major ]]; then
+    for d in /usr/lib/jvm/java-"$major"-*; do
+      [[ -d $d ]] && jdk=$d && break
+    done
+  fi
+  if [[ -n $jdk ]]; then
+    export JAVA_HOME="$jdk"
+    export PATH="$jdk/bin:$PATH"
+  else
+    echo "ccc-entrypoint: no JDK matching .java-version ($jv) installed; keeping system default" >&2
+    sleep 2
   fi
 fi
 
