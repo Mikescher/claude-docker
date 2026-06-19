@@ -28,7 +28,8 @@ RUN pacman -Syu --noconfirm --needed \
         cmake pkgconf ninja clang gtk3 mesa-utils \
         docker docker-buildx docker-compose \
         ffmpeg wl-clipboard libpulse \
-        jdk-openjdk jdk17-openjdk jdk11-openjdk ant \
+        restic \
+        jdk-openjdk jdk17-openjdk jdk11-openjdk ant maven \
         dotnet-sdk \
         go gopls delve golangci-lint \
         nodejs npm bun \
