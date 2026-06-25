@@ -15,7 +15,9 @@ ccc flags (consumed by the wrapper, not forwarded):
                        be given multiple times.
   --mount-parent       mount the parent directory (so siblings are reachable)
                        instead of just the current directory. The mount target
-                       inside the container always matches the host path.
+                       inside the container always matches the host path. This
+                       is also enabled automatically when the workdir is a git
+                       worktree whose gitdir lives under the parent.
   --net                use a private bridge network instead of the host's
                        (the default is --network host so host services on
                        127.0.0.1 — e.g. mongodb on 27017 — are reachable as
@@ -121,8 +123,33 @@ if [[ "$start_chrome" -eq 1 ]]; then
 fi
 
 host_pwd="$PWD"
+parent_dir="$(dirname -- "$host_pwd")"
+
+# Auto-detect git worktrees: when the workdir's `.git` is a *file* (not a dir)
+# it points at a gitdir elsewhere, e.g.
+#   gitdir: /home/me/Code/foo/master/.git/worktrees/wt-4
+# git inside the container needs that gitdir, but it lives outside the workdir,
+# so a plain workdir mount leaves git broken. In the common `repo/<worktree>`
+# layout the gitdir sits under our parent directory, so mounting the parent
+# brings it along — switch to a parent mount automatically. Only do this when
+# the gitdir really resolves to something under the parent; if it lives
+# elsewhere a parent mount wouldn't reach it, so there's nothing to gain.
+if [[ "$mount_parent" -eq 0 && -f "$host_pwd/.git" ]]; then
+  read -r gitdir_marker gitdir_target < "$host_pwd/.git" || true
+  if [[ "${gitdir_marker:-}" == "gitdir:" && -n "${gitdir_target:-}" ]]; then
+    [[ "$gitdir_target" != /* ]] && gitdir_target="$host_pwd/$gitdir_target"
+    gitdir_canon="$(readlink -f -- "$gitdir_target" 2>/dev/null || true)"
+    parent_canon="$(readlink -f -- "$parent_dir" 2>/dev/null || true)"
+    if [[ -n "$gitdir_canon" && -d "$gitdir_canon" \
+          && -n "$parent_canon" && "$gitdir_canon" == "$parent_canon"/* ]]; then
+      mount_parent=1
+      echo "ccc: git worktree detected — mounting $parent_dir so its gitdir is reachable" >&2
+    fi
+  fi
+fi
+
 if [[ "$mount_parent" -eq 1 ]]; then
-  mount_src="$(dirname -- "$host_pwd")"
+  mount_src="$parent_dir"
 else
   mount_src="$host_pwd"
 fi

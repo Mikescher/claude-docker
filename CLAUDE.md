@@ -35,6 +35,8 @@ The three files form a small system held together by three contracts:
 
 **Default network is `--network host`.** Host services bound to `127.0.0.1` (e.g. MongoDB on 27017) are reachable as `localhost` from inside the container without further config. `--net` switches to bridge networking and adds `host.docker.internal:host-gateway`.
 
+**Git-worktree auto parent-mount.** A worktree checkout has a `.git` *file* (not a dir) reading `gitdir: <path>`, where `<path>` is the real gitdir living under the main checkout (e.g. `repo/master/.git/worktrees/wt-4`). Mounting only the worktree dir would leave git broken inside the container, so `ccc` reads that `.git` file at startup and, when the gitdir resolves to something under the workdir's parent (the usual `repo/<worktree>` layout), flips on `--mount-parent` automatically so the gitdir comes along. It's gated on the gitdir actually existing under the parent — if it lives elsewhere a parent mount wouldn't reach it, so the wrapper leaves the mount alone. Relative `gitdir:` targets are resolved against the workdir; canonical paths are compared so symlinks don't cause false misses.
+
 **Update model is rebuild, not self-update.** The image sets `DISABLE_AUTOUPDATER=1`. Upgrading Claude Code means rerunning `make build`; the version-check prompt in `ccc` is the nudge.
 
 ## Things to know when editing
