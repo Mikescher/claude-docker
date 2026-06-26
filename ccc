@@ -13,6 +13,8 @@ ccc flags (consumed by the wrapper, not forwarded):
   --mount DIR          additionally bind-mount DIR into the container at the
                        same absolute path (errors if DIR does not exist). May
                        be given multiple times.
+  --mount-ro DIR       like --mount, but mount DIR read-only. May be given
+                       multiple times.
   --mount-parent       mount the parent directory (so siblings are reachable)
                        instead of just the current directory. The mount target
                        inside the container always matches the host path. This
@@ -57,6 +59,7 @@ start_chrome=0
 limit_cpu=1
 limit_memory=1
 extra_mounts=()
+extra_mounts_ro=()
 forwarded_args=()
 
 while [[ $# -gt 0 ]]; do
@@ -71,6 +74,18 @@ while [[ $# -gt 0 ]]; do
         exit 1
       fi
       extra_mounts+=( "$(cd -- "$2" &>/dev/null && pwd)" )
+      shift 2
+      ;;
+    --mount-ro)
+      if [[ $# -lt 2 ]]; then
+        echo "ccc: --mount-ro requires a directory argument" >&2
+        exit 1
+      fi
+      if [[ ! -d "$2" ]]; then
+        echo "ccc: --mount-ro: directory '$2' does not exist" >&2
+        exit 1
+      fi
+      extra_mounts_ro+=( "$(cd -- "$2" &>/dev/null && pwd)" )
       shift 2
       ;;
     --mount-parent)     mount_parent=1; shift ;;
@@ -179,6 +194,10 @@ docker_args=(
 
 for m in ${extra_mounts[@]+"${extra_mounts[@]}"}; do
   docker_args+=( -v "$m:$m" )
+done
+
+for m in ${extra_mounts_ro[@]+"${extra_mounts_ro[@]}"}; do
+  docker_args+=( -v "$m:$m:ro" )
 done
 
 docker_args+=( -v "$HOME/.claude:$container_home/.claude" )
