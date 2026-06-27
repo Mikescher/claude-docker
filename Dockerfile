@@ -24,6 +24,7 @@ RUN pacman -Syu --noconfirm --needed \
         git curl wget openssh \
         ripgrep fd jq tmux less vim nano \
         unzip zip tar which man-db bash-completion \
+        shellcheck mkvtoolnix-cli \
         sudo ca-certificates gnupg \
         cmake pkgconf ninja clang gtk3 mesa-utils \
         docker docker-buildx docker-compose \
