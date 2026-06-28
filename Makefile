@@ -17,6 +17,7 @@ define resolve_and_build
 	  --build-arg UID=$(UID) \
 	  --build-arg GID=$(GID) \
 	  --build-arg CLAUDE_VERSION=$$VERSION \
+	  --tag "autoprune-keep" \
 	  -t $(IMAGE) .
 endef
 
