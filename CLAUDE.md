@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Docker-based wrapper around Claude Code itself. The image bundles a developer toolchain (Go, Node/TS, Python, .NET, Flutter/Dart, Android SDK, MongoDB tools, ffmpeg, JDK, Docker CLI, …) plus the Claude Code native binary. The `ccc` script in the repo root is the user-facing entry point: it runs `claude --dangerously-skip-permissions` inside the container with the host's CWD bind-mounted at the **same absolute path** inside the container (so `/home/mike/Code/foo` on the host is `/home/mike/Code/foo` in the container — paths in errors, sourcemaps, and IDE projects line up). The script is meant to be symlinked onto `PATH` so `cd <project> && ccc` "just works".
+A Docker-based wrapper around Claude Code itself. The image bundles a developer toolchain (Go, Rust, Node/TS, Python, .NET, Flutter/Dart, Android SDK, MongoDB tools, ffmpeg, JDK, Docker CLI, …) plus the Claude Code native binary. The `ccc` script in the repo root is the user-facing entry point: it runs `claude --dangerously-skip-permissions` inside the container with the host's CWD bind-mounted at the **same absolute path** inside the container (so `/home/mike/Code/foo` on the host is `/home/mike/Code/foo` in the container — paths in errors, sourcemaps, and IDE projects line up). The script is meant to be symlinked onto `PATH` so `cd <project> && ccc` "just works".
 
 ## Build / run
 
@@ -42,7 +42,7 @@ The three files form a small system held together by three contracts:
 ## Things to know when editing
 
 - **Dockerfile layer order is load-bearing** for cache reuse: pacman → mongo tools (still root) → `useradd` → write `/usr/local/bin/ccc-entrypoint` (still root) → `USER ${USERNAME}` → npm / go / pipx → claude install. Pacman is the heaviest layer; do not move language-tool installs above it. Anything that depends on the user's `$HOME` must come after the `USER ${USERNAME}` switch.
-- **`PATH` precedence in the image** is `~/.npm-global/bin` → `~/.local/bin` → `~/go/bin` → system. So `npm i -g`, `pipx install`, and `go install` all land on `PATH` automatically; pacman packages need no extra setup.
+- **`PATH` precedence in the image** is `~/.npm-global/bin` → `~/.local/bin` → `~/go/bin` → `~/.cargo/bin` → system. So `npm i -g`, `pipx install`, `go install`, and `cargo install` all land on `PATH` automatically; pacman packages need no extra setup. Rust itself (`rustc`/`cargo`/`clippy`/`rustfmt`) is the pacman `rust` package in `/usr/bin`, deliberately not rustup — a rustup install puts its toolchain shims in `~/.cargo/bin`, which the runtime `~/.cargo` cache mount would shadow.
 - **MongoDB tools** are fetched as a tarball from `fastdl.mongodb.org` because Arch's repos don't carry them. The `rhel88-x86_64` build is the one that works on Arch; the older `rhel80` URLs now 404. Bump `MONGO_TOOLS_VERSION` in the Dockerfile to update.
 - **Version-check timeout in `ccc` is intentionally 1 s.** The endpoint typically responds in ~230 ms; raising the timeout regresses cold-start. The check also no-ops on a non-TTY stdin so piped invocations stay clean.
 - **Empty-array expansion in `ccc`** uses `${forwarded_args[@]+"${forwarded_args[@]}"}`. The `+` form is required because of `set -u` — don't simplify it.

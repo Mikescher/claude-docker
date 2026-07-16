@@ -18,7 +18,7 @@ ENV LANG=C.UTF-8 \
     GOPATH=/home/${USERNAME}/go \
     ANDROID_HOME=/home/${USERNAME}/Android/Sdk \
     ANDROID_SDK_ROOT=/home/${USERNAME}/Android/Sdk \
-    PATH=/home/${USERNAME}/.npm-global/bin:/home/${USERNAME}/.local/bin:/home/${USERNAME}/go/bin:/home/${USERNAME}/flutter/bin:/home/${USERNAME}/.pub-cache/bin:/home/${USERNAME}/Android/Sdk/cmdline-tools/latest/bin:/home/${USERNAME}/Android/Sdk/platform-tools:/usr/local/bin:/usr/bin:/bin
+    PATH=/home/${USERNAME}/.npm-global/bin:/home/${USERNAME}/.local/bin:/home/${USERNAME}/go/bin:/home/${USERNAME}/.cargo/bin:/home/${USERNAME}/flutter/bin:/home/${USERNAME}/.pub-cache/bin:/home/${USERNAME}/Android/Sdk/cmdline-tools/latest/bin:/home/${USERNAME}/Android/Sdk/platform-tools:/usr/local/bin:/usr/bin:/bin
 
 RUN pacman -Syu --noconfirm --needed \
         git curl wget openssh \
@@ -33,6 +33,7 @@ RUN pacman -Syu --noconfirm --needed \
         jdk-openjdk jdk17-openjdk jdk11-openjdk ant maven \
         dotnet-sdk \
         go gopls delve golangci-lint \
+        rust rust-analyzer \
         nodejs npm bun \
         python python-pip python-pipx \
         php composer \
@@ -176,7 +177,8 @@ RUN mkdir -p \
       /home/${USERNAME}/.cache/pip \
       /home/${USERNAME}/.cache/uv \
       /home/${USERNAME}/go/bin \
-      /home/${USERNAME}/go/pkg
+      /home/${USERNAME}/go/pkg \
+      /home/${USERNAME}/.cargo/bin
 
 RUN npm install -g typescript ts-node yarn pnpm eslint prettier @angular/cli mongosh
 
