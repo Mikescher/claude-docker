@@ -60,6 +60,25 @@ RUN ver="${TEMURIN_21_VERSION%+*}" build="${TEMURIN_21_VERSION#*+}" \
  && tar xz -C "$JAVA_21_HOME" --strip-components=1 -f /tmp/temurin21.tar.gz \
  && rm -f /tmp/temurin21.tar.gz
 
+# Apache Ivy — not in Arch's official repos, and the AUR package is unmaintained
+# and no longer builds. Fetched as the upstream binary tarball (same pattern as
+# MongoDB tools / Temurin above) and dropped in as a plain jar; a wrapper on PATH
+# launches it. The prebuilt jar is Java 8 bytecode so it runs on any JDK, but it
+# still bundles Pack200 (dropped from the JDK in 14) and reaches Thread.stop()
+# (dropped in 23), so the wrapper pins it to jdk11-openjdk to keep every code
+# path working — the system default JDK is left untouched (see the Temurin note).
+# Bump IVY_VERSION/SHA512 from https://dlcdn.apache.org/ant/ivy/.
+ARG IVY_VERSION=2.6.0
+ARG IVY_SHA512=120f6ab52fcced55dea59dcd3f2ad8f80143922a919b20e625593b8ef02314f092c00d7ec28ddc75c9df01d63c684cdfb4e2799c8324eff928503cc1e470a526
+RUN curl -fsSL "https://dlcdn.apache.org/ant/ivy/${IVY_VERSION}/apache-ivy-${IVY_VERSION}-bin.tar.gz" -o /tmp/ivy.tar.gz \
+ && echo "${IVY_SHA512}  /tmp/ivy.tar.gz" | sha512sum -c - \
+ && mkdir -p /opt/apache-ivy \
+ && tar xz -C /opt/apache-ivy --strip-components=1 -f /tmp/ivy.tar.gz "apache-ivy-${IVY_VERSION}/ivy-${IVY_VERSION}.jar" \
+ && mv "/opt/apache-ivy/ivy-${IVY_VERSION}.jar" /opt/apache-ivy/ivy.jar \
+ && printf '%s\n' '#!/bin/sh' 'exec /usr/lib/jvm/java-11-openjdk/bin/java -jar /opt/apache-ivy/ivy.jar "$@"' > /usr/local/bin/ivy \
+ && chmod +x /usr/local/bin/ivy \
+ && rm -f /tmp/ivy.tar.gz
+
 RUN groupadd -g ${GID} ${USERNAME} \
  && useradd -m -s /bin/bash -u ${UID} -g ${GID} ${USERNAME} \
  && echo "${USERNAME} ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/${USERNAME} \
@@ -136,22 +155,6 @@ EOF
 USER ${USERNAME}
 WORKDIR /home/${USERNAME}
 
-# ivy (Apache Ivy) from AUR — not in the official repos. makepkg refuses to
-# run as root, so this has to live after the USER switch; sudo (NOPASSWD)
-# handles the -i install step. The upstream tarball is signed by an Apache
-# Ivy release key that isn't in the base image's keyring; import it from a
-# keyserver so makepkg's PGP check passes (sha256sum is verified either way).
-# Ivy 2.5.3 source references Pack200 (removed in JDK 14) and Thread.stop()
-# (removed in JDK 23), so it has to be *built* against JDK 11; the runtime
-# default stays on the latest jdk-openjdk.
-RUN gpg --keyserver keyserver.ubuntu.com --recv-keys 5BE0BA8CB80602AE \
- && git clone --depth 1 https://aur.archlinux.org/ivy.git /tmp/ivy \
- && cd /tmp/ivy \
- && JAVA_HOME=/usr/lib/jvm/java-11-openjdk \
-    PATH=/usr/lib/jvm/java-11-openjdk/bin:$PATH \
-    makepkg -si --noconfirm \
- && rm -rf /tmp/ivy
-
 # .NET SDK 9.0 from AUR — pulls Microsoft's official tarball and installs
 # side-by-side under /usr/share/dotnet/sdk/<version>/, coexisting with the
 # latest `dotnet-sdk` from the official repo. The git repo is the *pkgbase*
@@ -164,7 +167,7 @@ RUN git clone --depth 1 https://aur.archlinux.org/dotnet-core-9.0-bin.git /tmp/d
  && makepkg -si --noconfirm \
  && rm -rf /tmp/dotnet-core-9.0-bin
 
-# makepkg -si shelled out to `sudo pacman -U` for ivy and the dotnet packages,
+# makepkg -si shelled out to `sudo pacman -U` for the dotnet packages,
 # repopulating the pacman cache with root-owned files; this RUN executes as
 # ${USERNAME}, so the cleanup needs sudo (NOPASSWD).
 RUN sudo rm -rf /var/cache/pacman/pkg/* /var/lib/pacman/sync/*
