@@ -43,22 +43,22 @@ ARG MONGO_TOOLS_VERSION=100.16.1
 RUN curl -fsSL "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-rhel88-x86_64-${MONGO_TOOLS_VERSION}.tgz" \
     | tar xz -C /usr/local/bin --strip-components=2 --wildcards '*/bin/*'
 
-# Eclipse Temurin 21 (Adoptium). Not in Arch's official repos — only the AUR,
+# Eclipse Temurin 25 (Adoptium). Not in Arch's official repos — only the AUR,
 # which this image has no helper for — so it's fetched as the upstream tarball
 # (same pattern as MongoDB tools / Android cmdline-tools) into the standard
 # /usr/lib/jvm tree so it sits alongside the pacman JDKs. The system default
-# (archlinux-java) is left on jdk-openjdk; reach this build via JAVA_21_HOME.
-# Bump TEMURIN_21_VERSION/SHA256 from api.adoptium.net (feature_releases/21/ga).
-ARG TEMURIN_21_VERSION=21.0.11+10
-ARG TEMURIN_21_SHA256=4b2220e232a97997b436ca6ab15cbf70171ecff52958a46159dfa5a8c44ca4de
-ENV JAVA_21_HOME=/usr/lib/jvm/java-21-temurin
-RUN ver="${TEMURIN_21_VERSION%+*}" build="${TEMURIN_21_VERSION#*+}" \
- && url="https://github.com/adoptium/temurin21-binaries/releases/download/jdk-${TEMURIN_21_VERSION//+/%2B}/OpenJDK21U-jdk_x64_linux_hotspot_${ver}_${build}.tar.gz" \
- && curl -fsSL "$url" -o /tmp/temurin21.tar.gz \
- && echo "${TEMURIN_21_SHA256}  /tmp/temurin21.tar.gz" | sha256sum -c - \
- && mkdir -p "$JAVA_21_HOME" \
- && tar xz -C "$JAVA_21_HOME" --strip-components=1 -f /tmp/temurin21.tar.gz \
- && rm -f /tmp/temurin21.tar.gz
+# (archlinux-java) is left on jdk-openjdk; reach this build via JAVA_25_HOME.
+# Bump TEMURIN_25_VERSION/SHA256 from api.adoptium.net (feature_releases/25/ga).
+ARG TEMURIN_25_VERSION=25.0.3+9
+ARG TEMURIN_25_SHA256=69264a7a211bf5029830d07bc3370f879769d62ebc5b5488e90c9343a2da0e1f
+ENV JAVA_25_HOME=/usr/lib/jvm/java-25-temurin
+RUN ver="${TEMURIN_25_VERSION%+*}" build="${TEMURIN_25_VERSION#*+}" \
+ && url="https://github.com/adoptium/temurin25-binaries/releases/download/jdk-${TEMURIN_25_VERSION//+/%2B}/OpenJDK25U-jdk_x64_linux_hotspot_${ver}_${build}.tar.gz" \
+ && curl -fsSL "$url" -o /tmp/temurin25.tar.gz \
+ && echo "${TEMURIN_25_SHA256}  /tmp/temurin25.tar.gz" | sha256sum -c - \
+ && mkdir -p "$JAVA_25_HOME" \
+ && tar xz -C "$JAVA_25_HOME" --strip-components=1 -f /tmp/temurin25.tar.gz \
+ && rm -f /tmp/temurin25.tar.gz
 
 # Apache Ivy — not in Arch's official repos, and the AUR package is unmaintained
 # and no longer builds. Fetched as the upstream binary tarball (same pattern as
@@ -97,8 +97,8 @@ if [[ -f .nvmrc ]]; then
 fi
 
 # .java-version (jenv/jabba/sdkman convention): switch the active JDK to match,
-# like .nvmrc does for node. Content is a version such as "21", "17", "1.8" or
-# a full "21.0.11" — we match on the *major* version against the JDKs installed
+# like .nvmrc does for node. Content is a version such as "25", "17", "1.8" or
+# a full "25.0.3" — we match on the *major* version against the JDKs installed
 # under /usr/lib/jvm (java-<major>-openjdk and the Temurin build). On a bad or
 # unmatched version it falls back to the system default, but loudly: an error
 # is printed and the start pauses 2s so the message is seen before claude takes
