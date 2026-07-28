@@ -43,12 +43,27 @@ ARG MONGO_TOOLS_VERSION=100.16.1
 RUN curl -fsSL "https://fastdl.mongodb.org/tools/db/mongodb-database-tools-rhel88-x86_64-${MONGO_TOOLS_VERSION}.tgz" \
     | tar xz -C /usr/local/bin --strip-components=2 --wildcards '*/bin/*'
 
-# Eclipse Temurin 25 (Adoptium). Not in Arch's official repos — only the AUR,
-# which this image has no helper for — so it's fetched as the upstream tarball
-# (same pattern as MongoDB tools / Android cmdline-tools) into the standard
-# /usr/lib/jvm tree so it sits alongside the pacman JDKs. The system default
-# (archlinux-java) is left on jdk-openjdk; reach this build via JAVA_25_HOME.
-# Bump TEMURIN_25_VERSION/SHA256 from api.adoptium.net (feature_releases/25/ga).
+# Eclipse Temurin 21 & 25 (Adoptium). Not in Arch's official repos — only the
+# AUR, which this image has no helper for — so each is fetched as the upstream
+# tarball (same pattern as MongoDB tools / Android cmdline-tools) into the
+# standard /usr/lib/jvm tree so they sit alongside the pacman JDKs. Two majors
+# are kept: 21 fills a gap (no jdk21-openjdk in Arch's repos), and 25 pins that
+# release so it survives pacman's jdk-openjdk advancing to a newer default. The
+# system default (archlinux-java) is left on jdk-openjdk; reach these builds via
+# JAVA_21_HOME/JAVA_25_HOME, or select one per-project with a .java-version file
+# (see ccc-entrypoint). Bump TEMURIN_<major>_VERSION/SHA256 from api.adoptium.net
+# (feature_releases/<major>/ga).
+ARG TEMURIN_21_VERSION=21.0.11+10
+ARG TEMURIN_21_SHA256=4b2220e232a97997b436ca6ab15cbf70171ecff52958a46159dfa5a8c44ca4de
+ENV JAVA_21_HOME=/usr/lib/jvm/java-21-temurin
+RUN ver="${TEMURIN_21_VERSION%+*}" build="${TEMURIN_21_VERSION#*+}" \
+ && url="https://github.com/adoptium/temurin21-binaries/releases/download/jdk-${TEMURIN_21_VERSION//+/%2B}/OpenJDK21U-jdk_x64_linux_hotspot_${ver}_${build}.tar.gz" \
+ && curl -fsSL "$url" -o /tmp/temurin21.tar.gz \
+ && echo "${TEMURIN_21_SHA256}  /tmp/temurin21.tar.gz" | sha256sum -c - \
+ && mkdir -p "$JAVA_21_HOME" \
+ && tar xz -C "$JAVA_21_HOME" --strip-components=1 -f /tmp/temurin21.tar.gz \
+ && rm -f /tmp/temurin21.tar.gz
+
 ARG TEMURIN_25_VERSION=25.0.3+9
 ARG TEMURIN_25_SHA256=69264a7a211bf5029830d07bc3370f879769d62ebc5b5488e90c9343a2da0e1f
 ENV JAVA_25_HOME=/usr/lib/jvm/java-25-temurin
@@ -97,19 +112,30 @@ if [[ -f .nvmrc ]]; then
 fi
 
 # .java-version (jenv/jabba/sdkman convention): switch the active JDK to match,
-# like .nvmrc does for node. Content is a version such as "25", "17", "1.8" or
-# a full "25.0.3" — we match on the *major* version against the JDKs installed
-# under /usr/lib/jvm (java-<major>-openjdk and the Temurin build). On a bad or
-# unmatched version it falls back to the system default, but loudly: an error
-# is printed and the start pauses 2s so the message is seen before claude takes
-# over the terminal.
+# like .nvmrc does for node. Content is a version such as "25", "21", "17",
+# "1.8" or a full "25.0.3" — we match on the *major* version against the JDKs
+# installed under /usr/lib/jvm (java-<major>-openjdk and the Temurin builds).
+# A vendor may be named to force a specific build when a major has more than one
+# (both java-25-openjdk and java-25-temurin exist): "temurin-25" / "25-temurin"
+# / sdkman's "25-tem" pick Temurin, "openjdk-25" picks the pacman JDK. A bare
+# version takes the first java-<major>-* match (openjdk sorts before temurin).
+# On a bad or unmatched version it falls back to the system default, but
+# loudly: an error is printed and the start pauses 2s so the message is seen
+# before claude takes over the terminal.
 if [[ -f .java-version ]]; then
-  jv=$(tr -d '[:space:]' < .java-version)
-  [[ $jv == 1.* ]] && jv=${jv#1.}   # legacy "1.8" -> "8"
+  raw=$(tr -d '[:space:]' < .java-version)
+  vendor='*'                          # bare version -> first java-<major>-* wins
+  case ${raw,,} in
+    *temurin*|*-tem) vendor=temurin ;;
+    *openjdk*|*-open) vendor=openjdk ;;
+  esac
+  jv=${raw//[!0-9.]/}                 # strip any vendor tag down to the number
+  jv=${jv#.}; jv=${jv%.}             # drop stray dots a tag may have left
+  [[ $jv == 1.* ]] && jv=${jv#1.}    # legacy "1.8" -> "8"
   major=${jv%%.*}
   jdk=""
   if [[ -n $major ]]; then
-    for d in /usr/lib/jvm/java-"$major"-*; do
+    for d in /usr/lib/jvm/java-"$major"-$vendor; do
       [[ -d $d ]] && jdk=$d && break
     done
   fi
@@ -117,7 +143,7 @@ if [[ -f .java-version ]]; then
     export JAVA_HOME="$jdk"
     export PATH="$jdk/bin:$PATH"
   else
-    echo "ccc-entrypoint: no JDK matching .java-version ($jv) installed; keeping system default" >&2
+    echo "ccc-entrypoint: no JDK matching .java-version ($raw) installed; keeping system default" >&2
     sleep 2
   fi
 fi
