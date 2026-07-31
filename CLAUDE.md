@@ -17,6 +17,8 @@ A Docker-based wrapper around Claude Code itself. The image bundles a developer 
 | `./ccc -h`                             | Show wrapper flags                                            |
 | `./ccc --shell`                        | Drop into bash inside the container (skips the claude binary) |
 
+Building **requires the buildx CLI plugin** (`pacman -S docker-buildx`) — see the BuildKit note below. `make build` checks for it and stops if it is missing.
+
 There is no test suite. The smoke-test pattern is `cd /tmp/somewhere && /path/to/ccc --shell <<<'<command>'`.
 
 ## Architecture (the parts that span files)
@@ -41,6 +43,7 @@ The three files form a small system held together by three contracts:
 
 ## Things to know when editing
 
+- **The build requires BuildKit.** `ccc-entrypoint` and the `notify-send` shim are written with `RUN cat > <file> <<'EOF'` heredocs, which only the BuildKit frontend parses. `docker build` uses BuildKit only when the **buildx CLI plugin** is installed — `DOCKER_BUILDKIT=1` is not a substitute (it errors out with "buildx component is missing"). Under the legacy builder the failure is silent and nasty: the Dockerfile parser swallows the heredoc body but `sh` gets an unterminated redirect, so both scripts are created **empty**, the build reports success, and the damage only surfaces at run time as `exec /usr/local/bin/ccc-entrypoint: exec format error` (exec of a 0-byte file). `make build` guards on `docker buildx version` for exactly this reason — if you add more generated scripts, keep using heredocs, but don't drop the guard.
 - **Dockerfile layer order is load-bearing** for cache reuse: pacman → mongo tools (still root) → `useradd` → write `/usr/local/bin/ccc-entrypoint` (still root) → `USER ${USERNAME}` → npm / go / pipx → claude install. Pacman is the heaviest layer; do not move language-tool installs above it. Anything that depends on the user's `$HOME` must come after the `USER ${USERNAME}` switch.
 - **`PATH` precedence in the image** is `~/.npm-global/bin` → `~/.local/bin` → `~/go/bin` → `~/.cargo/bin` → system. So `npm i -g`, `pipx install`, `go install`, and `cargo install` all land on `PATH` automatically; pacman packages need no extra setup. Rust itself (`rustc`/`cargo`/`clippy`/`rustfmt`) is the pacman `rust` package in `/usr/bin`, deliberately not rustup — a rustup install puts its toolchain shims in `~/.cargo/bin`, which the runtime `~/.cargo` cache mount would shadow.
 - **MongoDB tools** are fetched as a tarball from `fastdl.mongodb.org` because Arch's repos don't carry them. The `rhel88-x86_64` build is the one that works on Arch; the older `rhel80` URLs now 404. Bump `MONGO_TOOLS_VERSION` in the Dockerfile to update.

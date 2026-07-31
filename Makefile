@@ -4,7 +4,24 @@ UID            := $(shell id -u)
 GID            := $(shell id -g)
 USERNAME       ?= $(shell id -un)
 
+# The Dockerfile writes ccc-entrypoint/notify-send with `RUN cat > f <<'EOF'`,
+# which only BuildKit understands. The legacy builder consumes the heredoc body
+# out of the Dockerfile but hands `sh` an unterminated redirect, so the files
+# land *empty* and the build still "succeeds" — the breakage only shows up at
+# run time as `exec /usr/local/bin/ccc-entrypoint: exec format error`. Fail here
+# instead. `docker build` routes to BuildKit only when the buildx CLI plugin is
+# installed (DOCKER_BUILDKIT=1 is not a substitute); on Arch: pacman -S docker-buildx.
+define require_buildkit
+	if ! docker buildx version >/dev/null 2>&1; then \
+	  echo "docker buildx (BuildKit) is required but not installed." >&2; \
+	  echo "The Dockerfile uses RUN heredocs; the legacy builder silently writes empty scripts." >&2; \
+	  echo "Install it, e.g.:  sudo pacman -S docker-buildx" >&2; \
+	  exit 1; \
+	fi
+endef
+
 define resolve_and_build
+	$(call require_buildkit); \
 	VERSION=$$( \
 	  case "$(CLAUDE_VERSION)" in \
 	    latest|stable) curl -fsSL --max-time 5 "https://downloads.claude.ai/claude-code-releases/$(CLAUDE_VERSION)" ;; \
