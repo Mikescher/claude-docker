@@ -272,7 +272,14 @@ if [[ "$mount_docker" -eq 1 && -S /var/run/docker.sock ]]; then
   docker_args+=( --group-add "$docker_sock_gid" )
 fi
 
-[[ -f "$HOME/.gitconfig" ]]   && docker_args+=( -v "$HOME/.gitconfig:$container_home/.gitconfig:ro" )
+# A container-specific git identity/config can be dropped at ~/.gitconfig-ccc on
+# the host; it takes precedence and is still mounted as ~/.gitconfig inside, so
+# git in the container sees it without any extra config.
+if [[ -f "$HOME/.gitconfig-ccc" ]]; then
+  docker_args+=( -v "$HOME/.gitconfig-ccc:$container_home/.gitconfig:ro" )
+elif [[ -f "$HOME/.gitconfig" ]]; then
+  docker_args+=( -v "$HOME/.gitconfig:$container_home/.gitconfig:ro" )
+fi
 
 [[ -f /etc/vimrc ]]           && docker_args+=( -v "/etc/vimrc:/etc/vimrc:ro" )
 [[ -f /etc/vim/vimrc ]]       && docker_args+=( -v "/etc/vim/vimrc:/etc/vim/vimrc:ro" )
