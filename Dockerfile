@@ -164,6 +164,9 @@ fi
 exec "$@"
 EOF
 
+# playwright
+RUN npx playwright install chromium
+
 # notify-send shim: forwards args (NUL-separated) to a FIFO bind-mounted from
 # the host. The host side of ccc runs a tiny bash reader that pipes them into
 # the host's real notify-send. This avoids exposing the dbus session bus to
