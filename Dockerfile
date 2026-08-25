@@ -94,6 +94,20 @@ RUN curl -fsSL "https://dlcdn.apache.org/ant/ivy/${IVY_VERSION}/apache-ivy-${IVY
  && chmod +x /usr/local/bin/ivy \
  && rm -f /tmp/ivy.tar.gz
 
+# pdftk — Arch dropped the original (GCJ-only) pdftk long ago; what's packaged
+# today is pdftk-java, and only in the AUR, which this image has no helper for.
+# Fetched as the upstream fat jar from the project's GitLab generic package
+# registry (same pattern as Ivy above) with a wrapper on PATH that runs it on
+# the system default JDK — pdftk-java is plain Java 8+ bytecode with no JDK
+# internals, so it needs no pinned runtime. Bump PDFTK_VERSION/SHA256 from
+# https://gitlab.com/pdftk-java/pdftk/-/releases.
+ARG PDFTK_VERSION=3.3.2
+ARG PDFTK_SHA256=497a3c5ab1c0b3882f372d40c1c04ab0e0a7a3317067b55a794669ea6a91bedd
+RUN curl -fsSL "https://gitlab.com/api/v4/projects/5024297/packages/generic/pdftk-java/v${PDFTK_VERSION}/pdftk-all.jar" -o /bin/pdftk.jar \
+ && echo "${PDFTK_SHA256}  /bin/pdftk.jar" | sha256sum -c - \
+ && printf '%s\n' '#!/usr/bin/env sh' 'exec java -jar /bin/pdftk.jar "$@"' > /bin/pdftk \
+ && chmod +x /bin/pdftk
+
 RUN groupadd -g ${GID} ${USERNAME} \
  && useradd -m -s /bin/bash -u ${UID} -g ${GID} ${USERNAME} \
  && echo "${USERNAME} ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/${USERNAME} \
