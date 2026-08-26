@@ -17,6 +17,7 @@ A small helper script which allows me to quickly start a containerized claude co
 - node (plus automatic nvm)
 - python
 - Docker (docker-in-docker)
+- database clients (postgres/psql, mongodb tools)
 
 ## Mounted volumes (plus current work dir)
 

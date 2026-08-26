@@ -30,6 +30,7 @@ RUN pacman -Syu --noconfirm --needed \
         docker docker-buildx docker-compose \
         ffmpeg wl-clipboard libpulse \
         restic \
+        postgresql \
         jdk-openjdk jdk17-openjdk jdk11-openjdk ant maven \
         dotnet-sdk \
         go gopls delve golangci-lint \

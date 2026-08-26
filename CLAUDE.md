@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Docker-based wrapper around Claude Code itself. The image bundles a developer toolchain (Go, Rust, Node/TS, Python, .NET, Flutter/Dart, Android SDK, MongoDB tools, ffmpeg, JDK, Docker CLI, …) plus the Claude Code native binary. The `ccc` script in the repo root is the user-facing entry point: it runs `claude --dangerously-skip-permissions` inside the container with the host's CWD bind-mounted at the **same absolute path** inside the container (so `/home/mike/Code/foo` on the host is `/home/mike/Code/foo` in the container — paths in errors, sourcemaps, and IDE projects line up). The script is meant to be symlinked onto `PATH` so `cd <project> && ccc` "just works".
+A Docker-based wrapper around Claude Code itself. The image bundles a developer toolchain (Go, Rust, Node/TS, Python, .NET, Flutter/Dart, Android SDK, PostgreSQL, MongoDB tools, ffmpeg, JDK, Docker CLI, …) plus the Claude Code native binary. The `ccc` script in the repo root is the user-facing entry point: it runs `claude --dangerously-skip-permissions` inside the container with the host's CWD bind-mounted at the **same absolute path** inside the container (so `/home/mike/Code/foo` on the host is `/home/mike/Code/foo` in the container — paths in errors, sourcemaps, and IDE projects line up). The script is meant to be symlinked onto `PATH` so `cd <project> && ccc` "just works".
 
 ## Build / run
 
