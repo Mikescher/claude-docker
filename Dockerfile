@@ -164,9 +164,10 @@ if [[ -f .java-version ]]; then
 fi
 
 # chrome-devtools-mcp ships configured to spawn its own Chrome, which can't
-# work in this container (no display, no chrome binary). Re-point it at a
-# host Chrome reachable on the shared host network — start one with:
-#   google-chrome --remote-debugging-port=9222 --user-data-dir=/tmp/chrome-mcp
+# work in this container (no display, no chrome binary). Re-point it at
+# 127.0.0.1:9222 on the shared host network, where `ccc` keeps a lazy broker
+# that starts a host Chrome on the first connection. The port is a contract
+# with the wrapper's chrome_broker_port — change both or neither.
 # Idempotent (skips when the flag is already present); re-applies after
 # plugin updates wipe the marketplace cache.
 mcp_cfg="$HOME/.claude/plugins/cache/claude-plugins-official/chrome-devtools-mcp/latest/.claude-plugin/plugin.json"

@@ -7,6 +7,8 @@ A small helper script which allows me to quickly start a containerized claude co
 - `--mount-parent`: Mount parent-dir into container (except current dir)
 - `--net`: Run in docker network (instead of host network)
 - `--shell`: Run a bash shell instead of claude-code
+- `--chrome`: Start the host chrome right away instead of on first use
+- `--no-chrome`: Do not front `127.0.0.1:9222` with the lazy chrome broker
 
 ## Installed tools
 
@@ -30,6 +32,7 @@ A small helper script which allows me to quickly start a containerized claude co
 ## Other features
 
 - Forward `notify-send` to host
+- Chrome for the chrome-devtools MCP starts on first use (needs `socat`)
 - Mounts directory at same path in container as it was outside
 - Container user matches user who build image
 - Container name matches directory

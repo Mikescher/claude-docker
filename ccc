@@ -3,6 +3,120 @@ set -euo pipefail
 
 IMAGE="${CCC_IMAGE:-claude-docker}"
 
+# Chrome is not started up front. A lazy TCP broker (socat, started further
+# down) listens on 127.0.0.1:9222 — the address ccc-entrypoint hardcodes into
+# the container's chrome-devtools-mcp — and runs *this script* with
+# --internal-chrome-relay for every connection it accepts. The relay makes
+# sure a host chrome is up, then splices the connection through to it. So
+# chrome starts on the first chrome MCP tool call and never before, and the
+# container needs to know nothing about any of it.
+#
+# The two ports are split on purpose: chrome owns 9223 for its whole life, the
+# broker owns 9222. Only the first request of an MCP session crosses the
+# broker — /json/version answers with a ws:// URL naming 9223, which puppeteer
+# then dials directly (host networking, so the container reaches it).
+#
+# Both processes outlive ccc, so the next session finds a warm browser and a
+# live broker instead of paying the cold start again.
+chrome_broker_port=9222
+chrome_debug_port=9223
+chrome_cache="${XDG_CACHE_HOME:-$HOME/.cache}/ccc-chrome"
+
+chrome_bin() {
+  local c
+  for c in ${CCC_CHROME:+"$CCC_CHROME"} google-chrome-stable google-chrome chromium; do
+    if command -v "$c" >/dev/null 2>&1; then
+      printf '%s\n' "$c"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Is anything listening on port $1? Read procfs rather than connecting, since
+# connecting to the broker is exactly what wakes it — and rather than shelling
+# out to `ss`, which is a popular name for a personal script and may be
+# anything at all on the user's PATH. In /proc/net/tcp{,6} local_address is
+# hex IP:port and state 0A is LISTEN; any local address counts, because a
+# wildcard listener would collide with our loopback bind just the same.
+chrome_port_busy() {
+  local hex f addr st procfs=0
+  hex=$(printf '%04X' "$1")
+  for f in /proc/net/tcp /proc/net/tcp6; do
+    [[ -r "$f" ]] || continue
+    procfs=1
+    while read -r _ addr _ st _; do
+      [[ "$st" == 0A && "$addr" == *:"$hex" ]] && return 0
+    done < "$f"
+  done
+  [[ "$procfs" -eq 1 ]] && return 1
+  curl -fsS --max-time 1 "http://127.0.0.1:$1/json/version" >/dev/null 2>&1
+}
+
+# Bring up a host chrome with a devtools endpoint on $1, returning only once it
+# answers. Idempotent, so every relayed connection can call it. Writes nothing
+# to stdout — in relay mode stdout is the client socket.
+ensure_chrome() {
+  local port="$1"
+  local profile="$chrome_cache/profile-$port"
+  local bin i
+
+  if curl -fsS --max-time 1 "http://127.0.0.1:$port/json/version" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if ! bin="$(chrome_bin)"; then
+    echo "ccc: no chrome found (tried \$CCC_CHROME, google-chrome-stable, google-chrome, chromium)" >&2
+    return 1
+  fi
+
+  # A fresh profile greets you with the first-run flow, the metrics-consent
+  # screen and — after any unclean exit — the "Restore pages?" bubble, all of
+  # them modal enough to stall CDP-driven navigation. The launch flags cover
+  # most of it, these two files cover the rest. Written only when the profile
+  # does not exist yet, so later choices made in this browser survive.
+  if [[ ! -d "$profile" ]]; then
+    mkdir -p "$profile/Default"
+    printf '%s\n' '{"user_experience_metrics":{"reporting_enabled":false}}' > "$profile/Local State"
+    printf '%s\n' '{"browser":{"has_seen_welcome_page":true},"profile":{"exit_type":"Normal","exited_cleanly":true}}' > "$profile/Default/Preferences"
+  fi
+
+  # setsid: chrome has to survive both the relay child that spawned it and ccc
+  # itself, and a Ctrl-C in ccc's terminal signals the whole foreground process
+  # group — which chrome answers by shutting down.
+  # --password-store=basic stops a fresh profile from popping a kwallet /
+  # gnome-keyring unlock dialog, which is as modal as the rest.
+  setsid -f "$bin" \
+    --remote-debugging-port="$port" \
+    --user-data-dir="$profile" \
+    --no-first-run \
+    --no-default-browser-check \
+    --disable-search-engine-choice-screen \
+    --hide-crash-restore-bubble \
+    --password-store=basic \
+    --noerrdialogs \
+    about:blank </dev/null >/dev/null 2>&1
+
+  # `setsid -f` returns before the exec, so polling is the only honest
+  # readiness check. A warm chrome needs ~1s, a cold profile a little more.
+  for ((i = 0; i < 30; i++)); do
+    sleep 0.5
+    if curl -fsS --max-time 1 "http://127.0.0.1:$port/json/version" >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  echo "ccc: chrome did not open a devtools port on $port within 15s" >&2
+  return 1
+}
+
+# Hidden entry point: one invocation per connection the broker accepts, with
+# stdin/stdout wired to that connection. Nothing below this point — flag
+# parsing, the image check, the version prompt — may run here.
+if [[ "${1:-}" == "--internal-chrome-relay" ]]; then
+  ensure_chrome "$chrome_debug_port" || exit 1
+  exec socat - "TCP:127.0.0.1:$chrome_debug_port"
+fi
+
 usage() {
   cat <<'EOF'
 ccc - run Claude Code in a Docker container
@@ -35,9 +149,10 @@ ccc flags (consumed by the wrapper, not forwarded):
                        (default: host RAM minus 8 GiB)
   --no-limit           shorthand for --no-cpu-limit --no-memory-limit
   --shell              drop into bash inside the container instead of running claude
-  --chrome             launch google-chrome-stable with --remote-debugging-port=9222
-                       on the host (so chrome-devtools-mcp can attach) if nothing is
-                       already listening on that port
+  --chrome             start the host chrome right away instead of on first use,
+                       so the first chrome MCP tool call pays no cold start
+  --no-chrome          do not front 127.0.0.1:9222 with the lazy chrome broker
+                       (chrome-devtools-mcp tools then have nothing to attach to)
   -h, --help           show this help and exit
 
 Anything else is forwarded to `claude` (which always runs with
@@ -45,7 +160,18 @@ Anything else is forwarded to `claude` (which always runs with
 explicitly: `ccc --mount-parent -- --print "query"`.
 
 Environment:
-  CCC_IMAGE   override the docker image name (default: claude-docker)
+  CCC_IMAGE    override the docker image name (default: claude-docker)
+  CCC_CHROME   chrome binary to launch (default: the first of
+               google-chrome-stable, google-chrome, chromium on PATH)
+
+Chrome on demand:
+  ccc puts a lazy broker (socat) on 127.0.0.1:9222, the address the
+  container's chrome-devtools-mcp attaches to. The first connection starts
+  chrome on the host with --remote-debugging-port=9223 and a persistent
+  profile under ~/.cache/ccc-chrome, then relays the connection through — so
+  the chrome MCP is always usable and chrome only opens when it is actually
+  used. Both chrome and the broker are left running when ccc exits. Needs
+  socat on the host and --network host (the default).
 EOF
 }
 
@@ -55,7 +181,8 @@ skip_version_check=0
 do_shell=0
 mount_docker=1
 mount_cache=1
-start_chrome=0
+chrome_enabled=1
+chrome_eager=0
 limit_cpu=1
 limit_memory=1
 extra_mounts=()
@@ -97,14 +224,16 @@ while [[ $# -gt 0 ]]; do
     --no-memory-limit)  limit_memory=0; shift ;;
     --no-limit)         limit_cpu=0; limit_memory=0; shift ;;
     --shell)            do_shell=1; shift ;;
-    --chrome)           start_chrome=1; shift ;;
+    --chrome)           chrome_eager=1; shift ;;
+    --no-chrome)        chrome_enabled=0; shift ;;
     -h|--help)          usage; exit 0 ;;
     --)                 shift; forwarded_args+=("$@"); break ;;
     *)                  forwarded_args+=("$1"); shift ;;
   esac
 done
 
-script_dir="$(cd -- "$(dirname -- "$(readlink -f "${BASH_SOURCE[0]}")")" &>/dev/null && pwd)"
+self="$(readlink -f -- "${BASH_SOURCE[0]}")"
+script_dir="$(cd -- "$(dirname -- "$self")" &>/dev/null && pwd)"
 
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
   echo "ccc: image '$IMAGE' not found — run 'make build' in $script_dir first" >&2
@@ -126,14 +255,48 @@ if [[ "$skip_version_check" -eq 0 && "$do_shell" -eq 0 && -t 0 && -t 1 ]]; then
   fi
 fi
 
-if [[ "$start_chrome" -eq 1 ]]; then
-  if curl -fsS --max-time 1 http://127.0.0.1:9222/json/version >/dev/null 2>&1; then
-    :
-  elif command -v google-chrome-stable >/dev/null 2>&1; then
-    google-chrome-stable --remote-debugging-port=9222 --user-data-dir=/tmp/chrome-profile-stable >/dev/null 2>&1 &
-    disown
+# Install the broker (see the top of this file). Every guard below degrades to
+# a single line and a working session — the chrome MCP is the only thing that
+# stops working. `eager_port` doubles as the fallback answer for --chrome: it
+# is the port to start chrome on now, or empty when there is nothing to do.
+if [[ "$chrome_enabled" -eq 1 ]]; then
+  eager_port="$chrome_debug_port"
+  if chrome_port_busy "$chrome_broker_port"; then
+    # A chrome of the user's own, or a broker from a sibling session, already
+    # serves the address the container talks to. Leave it alone and use it.
+    eager_port=""
+  elif ! chrome_bin >/dev/null; then
+    echo "ccc: no chrome found — chrome-on-demand disabled (set \$CCC_CHROME or install google-chrome)" >&2
+    eager_port=""
+  elif [[ "$host_net" -eq 0 ]]; then
+    echo "ccc: --net given — chrome-on-demand needs host loopback, skipping" >&2
+    eager_port=""
+  elif ! command -v socat >/dev/null 2>&1; then
+    # No listener without socat, so no on-demand start. --chrome still works,
+    # by putting chrome straight onto the port the container attaches to.
+    echo "ccc: socat not found — chrome-on-demand disabled (pacman -S socat); --chrome still works" >&2
+    eager_port="$chrome_broker_port"
+  elif [[ "$self" == *[[:space:],]* || "$self" == *'!!'* ]]; then
+    # socat splits an EXEC command line on single spaces and reads ',' as an
+    # option separator and '!!' as an address separator, so such a path cannot
+    # be handed to it safely.
+    echo "ccc: script path '$self' contains a space, comma or '!!' — chrome-on-demand disabled" >&2
+    eager_port=""
   else
-    echo "ccc: --chrome requested but google-chrome-stable not found on PATH" >&2
+    # `fork` is what makes this a listener rather than a one-shot: each
+    # connection gets its own relay child, with the socket on its stdin and
+    # stdout through a socketpair, so HTTP and the binary WebSocket frames that
+    # follow pass byte-for-byte. socat's stderr (and every relay child's) goes
+    # to the log — truncated per broker, since this is its only owner — because
+    # a stray diagnostic behind claude's TUI would corrupt the display. setsid
+    # keeps the broker out of ccc's process group, so neither Ctrl-C nor a
+    # closing terminal takes it down while a sibling session may still need it.
+    mkdir -p "$chrome_cache"
+    setsid -f socat "TCP-LISTEN:$chrome_broker_port,bind=127.0.0.1,reuseaddr,fork" \
+      "EXEC:$self --internal-chrome-relay" </dev/null >/dev/null 2>"$chrome_cache/broker.log"
+  fi
+  if [[ "$chrome_eager" -eq 1 && -n "$eager_port" ]]; then
+    ensure_chrome "$eager_port" || true
   fi
 fi
 
@@ -230,13 +393,10 @@ else
   docker_args+=( --add-host=host.docker.internal:host-gateway )
 fi
 
-if [[ "$start_chrome" -eq 1 ]]; then
-
-  # claude mcp add -s user chrome-devtools -- npx chrome-devtools-mcp@latest --browserUrl http://127.0.0.1:9222
-
-  [[ -d "/opt/google/chrome" ]] && docker_args+=( -v "/opt/google/chrome:/opt/google/chrome:ro" )
-
-fi
+# Chrome's install tree, read-only, for anything in the container that wants to
+# exec the browser itself (flutter's web target, playwright's CHROME_EXECUTABLE).
+# Unrelated to the broker — the chrome MCP only ever speaks CDP over the network.
+[[ -d "/opt/google/chrome" ]] && docker_args+=( -v "/opt/google/chrome:/opt/google/chrome:ro" )
 
 
 # Resource limits: leave headroom on the host so a runaway build inside the
