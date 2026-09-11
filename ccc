@@ -73,12 +73,14 @@ ensure_chrome() {
   # A fresh profile greets you with the first-run flow, the metrics-consent
   # screen and — after any unclean exit — the "Restore pages?" bubble, all of
   # them modal enough to stall CDP-driven navigation. The launch flags cover
-  # most of it, these two files cover the rest. Written only when the profile
-  # does not exist yet, so later choices made in this browser survive.
+  # most of it, these two files cover the rest — including the save-password
+  # and breached-password bubbles a scripted login would otherwise trigger.
+  # Written only when the profile does not exist yet, so later choices made in
+  # this browser survive.
   if [[ ! -d "$profile" ]]; then
     mkdir -p "$profile/Default"
     printf '%s\n' '{"user_experience_metrics":{"reporting_enabled":false}}' > "$profile/Local State"
-    printf '%s\n' '{"browser":{"has_seen_welcome_page":true},"profile":{"exit_type":"Normal","exited_cleanly":true}}' > "$profile/Default/Preferences"
+    printf '%s\n' '{"browser":{"has_seen_welcome_page":true},"credentials_enable_service":false,"credentials_enable_autosignin":false,"profile":{"exit_type":"Normal","exited_cleanly":true,"password_manager_leak_detection":false}}' > "$profile/Default/Preferences"
   fi
 
   # setsid: chrome has to survive both the relay child that spawned it and ccc
