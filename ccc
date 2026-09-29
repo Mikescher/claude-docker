@@ -142,6 +142,8 @@ ccc flags (consumed by the wrapper, not forwarded):
                        localhost from inside the container)
   --no-version-check   skip the upstream version comparison
   --no-docker          do not forward the host's docker socket
+  --no-claude-temp     do not mount the host's per-project claude temp dir
+                       (/tmp/claude-<uid>/<cwd-slug>: scratchpads, task output)
   --no-cache           do not mount the language cache directories
                        (~/go/pkg, ~/.cache/go-build, ~/.npm, ~/.nvm, ~/.cache/pip,
                        ~/.cache/uv, ~/.cargo, ~/.nuget, ~/.gradle, ~/.pub-cache)
@@ -183,6 +185,7 @@ skip_version_check=0
 do_shell=0
 mount_docker=1
 mount_cache=1
+mount_claude_temp=1
 chrome_enabled=1
 chrome_eager=0
 limit_cpu=1
@@ -222,6 +225,7 @@ while [[ $# -gt 0 ]]; do
     --no-version-check) skip_version_check=1; shift ;;
     --no-docker)        mount_docker=0; shift ;;
     --no-cache)         mount_cache=0; shift ;;
+    --no-claude-temp)   mount_claude_temp=0; shift ;;
     --no-cpu-limit)     limit_cpu=0; shift ;;
     --no-memory-limit)  limit_memory=0; shift ;;
     --no-limit)         limit_cpu=0; limit_memory=0; shift ;;
@@ -368,6 +372,28 @@ done
 docker_args+=( -v "$HOME/.claude:$container_home/.claude" )
 
 [[ -f "$HOME/.claude.json" ]] && docker_args+=( -v "$HOME/.claude.json:$container_home/.claude.json" )
+
+# Claude's per-project temp dir is <tmpdir>/claude-<uid>/<cwd, non-alnum -> '-'>;
+# past 200 chars it gets a hash suffix we can't reproduce, so skip those. The
+# parent needs a user-owned tmpfs: docker would create it as root for the bind,
+# and claude writes siblings of the project dir there too (bash-edit-diff).
+if [[ "$mount_claude_temp" -eq 1 ]]; then
+  claude_temp_slug="${host_pwd//[^a-zA-Z0-9]/-}"
+  if [[ ${#claude_temp_slug} -le 200 ]]; then
+    host_tmp="${TMPDIR:-/tmp}"
+    host_tmp="${host_tmp%/}"
+    claude_temp_src="${host_tmp:-/tmp}/claude-$(id -u)/$claude_temp_slug"
+    claude_temp_dst="/tmp/claude-$(id -u)"
+    if (umask 077 && mkdir -p -- "$claude_temp_src") 2>/dev/null; then
+      docker_args+=(
+        --tmpfs "$claude_temp_dst:uid=$(id -u),gid=$(id -g),mode=0700"
+        -v "$claude_temp_src:$claude_temp_dst/$claude_temp_slug"
+      )
+    else
+      echo "ccc: cannot create $claude_temp_src — claude temp dir not mounted" >&2
+    fi
+  fi
+fi
 
 if [[ "$mount_cache" -eq 1 ]]; then
   [[ -d "$HOME/go/pkg" ]]          && docker_args+=( -v "$HOME/go/pkg:$container_home/go/pkg" )
