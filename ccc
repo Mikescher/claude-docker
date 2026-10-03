@@ -39,7 +39,7 @@ chrome_bin() {
 # anything at all on the user's PATH. In /proc/net/tcp{,6} local_address is
 # hex IP:port and state 0A is LISTEN; any local address counts, because a
 # wildcard listener would collide with our loopback bind just the same.
-chrome_port_busy() {
+port_busy() {
   local hex f addr st procfs=0
   hex=$(printf '%04X' "$1")
   for f in /proc/net/tcp /proc/net/tcp6; do
@@ -119,6 +119,231 @@ if [[ "${1:-}" == "--internal-chrome-relay" ]]; then
   exec socat - "TCP:127.0.0.1:$chrome_debug_port"
 fi
 
+# Android emulators run on the host, never in the container: the host has the
+# AVDs, KVM, the GPU and the desktop the window opens on. adb inside the
+# container (and flutter, mobile-mcp) uses the host's adb server on
+# 127.0.0.1:5037 over the shared network namespace; the one thing it cannot do
+# is launch an emulator. For that, every session gets a Unix socket, mounted
+# at /run/ccc-android/sock, on which socat runs *this script* with
+# --internal-android-relay per connection. The container side is the image's
+# ccc-emulator, also installed as `emulator` for flutter.
+#
+# Protocol: one request line — "list", "version", "adb-server" or
+# "start <avd> [flags]" — answered by lines tagged "o " (stdout) and "e "
+# (stderr), then "x <exit code>". The socket is a command channel into the
+# host and the emulator CLI has flags that run host programs or open host
+# paths (-qemu, -shell, -sysdir, ...), so start takes an allow-list only.
+#
+# Emulators are setsid'd like chrome and outlive the session; the per-session
+# listener does not.
+android_cache="${XDG_CACHE_HOME:-$HOME/.cache}/ccc-android"
+
+android_sdk() {
+  local d
+  for d in ${CCC_ANDROID_SDK:+"$CCC_ANDROID_SDK"} ${ANDROID_HOME:+"$ANDROID_HOME"} \
+           ${ANDROID_SDK_ROOT:+"$ANDROID_SDK_ROOT"} "$HOME/Android/Sdk" /opt/android/sdk /opt/android-sdk; do
+    if [[ -x "$d/emulator/emulator" ]]; then
+      printf '%s\n' "$d"
+      return 0
+    fi
+  done
+  return 1
+}
+
+relay_say() { printf 'o %s\n' "$@"; }
+relay_warn() { printf 'e %s\n' "$@"; }
+
+# -list-avds mixes INFO log lines into stdout; AVD names never contain spaces.
+android_avds() {
+  "$android_emu" -list-avds 2>/dev/null | grep -E '^[A-Za-z0-9._-]+$' || true
+}
+
+android_ensure_adb() {
+  if "$android_adb" start-server >"$android_cache/adb-start.log" 2>&1 </dev/null; then
+    return 0
+  fi
+  relay_warn "ccc: could not start the host's adb server:"
+  sed 's/^/e   /' "$android_cache/adb-start.log"
+  return 1
+}
+
+android_serial_of() {
+  local serial _ name
+  while read -r serial _; do
+    [[ "$serial" == emulator-* ]] || continue
+    name="$("$android_adb" -s "$serial" emu avd name 2>/dev/null | head -n 1)"
+    if [[ "${name%$'\r'}" == "$1" ]]; then
+      printf '%s\n' "$serial"
+      return 0
+    fi
+  done < <("$android_adb" devices 2>/dev/null)
+  return 1
+}
+
+android_flag_value_ok() {
+  case "$1" in
+    -gpu)    [[ "$2" =~ ^(auto|host|software|swiftshader|swiftshader_indirect|swangle|swangle_indirect|angle_indirect|lavapipe|guest|off)$ ]] ;;
+    -memory) [[ "$2" =~ ^[1-9][0-9]{2,5}$ ]] ;;
+    -cores)  [[ "$2" =~ ^[1-9][0-9]?$ ]] ;;
+    -port)   [[ "$2" =~ ^55[5-8][0-9]$ ]] && (( $2 >= 5554 && $2 <= 5584 && $2 % 2 == 0 )) ;;
+    *)       return 1 ;;
+  esac
+}
+
+android_start() {
+  local avd="${1:-}" port="" p pid serial log devs i windowed=1 wipe=0 read_only=0
+  local -a flags=() extra=()
+  shift || true
+  if [[ ! "$avd" =~ ^[A-Za-z0-9._-]+$ ]]; then
+    relay_warn "ccc: invalid AVD name '$avd'"
+    return 2
+  fi
+  while (($#)); do
+    case "$1" in
+      -no-window) windowed=0; flags+=("$1") ;;
+      -wipe-data) wipe=1; flags+=("$1") ;;
+      -read-only) read_only=1; flags+=("$1") ;;
+      -no-snapshot|-no-snapshot-load|-no-snapshot-save|-no-boot-anim|-no-audio|-no-metrics|-delay-adb)
+        flags+=("$1") ;;
+      -gpu|-memory|-cores|-port)
+        if ! android_flag_value_ok "$1" "${2:-}"; then
+          relay_warn "ccc: bad value '${2:-}' for $1"
+          return 2
+        fi
+        if [[ "$1" == -port ]]; then
+          port="$2"
+        else
+          flags+=("$1" "$2")
+        fi
+        shift ;;
+      *)
+        relay_warn "ccc: emulator flag '$1' is not allowed here; allowed: -no-window -no-snapshot" \
+          "-no-snapshot-load -no-snapshot-save -no-boot-anim -read-only -wipe-data -no-audio -no-metrics" \
+          "-delay-adb -gpu MODE -memory MB -cores N -port EVEN (5554-5584)"
+        return 2 ;;
+    esac
+    shift
+  done
+
+  if ! grep -qxF -- "$avd" <<<"$(android_avds)"; then
+    relay_warn "ccc: no AVD named '$avd' on the host; available:"
+    android_avds | sed 's/^/e   /'
+    return 1
+  fi
+  android_ensure_adb || return 1
+
+  if [[ "$read_only" -eq 0 ]] && serial="$(android_serial_of "$avd")"; then
+    if [[ "$wipe" -eq 1 ]]; then
+      relay_warn "ccc: $avd is running as $serial; stop it before wiping its data"
+      return 1
+    fi
+    relay_warn "ccc: $avd is already running as $serial"
+    relay_say "$serial"
+    return 0
+  fi
+
+  if [[ -z "$port" ]]; then
+    for ((p = 5554; p <= 5584; p += 2)); do
+      if ! port_busy "$p" && ! port_busy "$((p + 1))"; then
+        port="$p"
+        break
+      fi
+    done
+    if [[ -z "$port" ]]; then
+      relay_warn "ccc: no free emulator port pair between 5554 and 5585"
+      return 1
+    fi
+  elif port_busy "$port" || port_busy "$((port + 1))"; then
+    relay_warn "ccc: emulator port $port or $((port + 1)) is in use"
+    return 1
+  fi
+  serial="emulator-$port"
+
+  if [[ "$windowed" -eq 1 && -z "${DISPLAY:-}" ]]; then
+    relay_warn "ccc: no DISPLAY on the host, starting $avd without a window"
+    flags+=(-no-window)
+    windowed=0
+  fi
+  read -r -a extra <<<"${CCC_EMULATOR_ARGS:-}"
+
+  log="$android_cache/$avd.log"
+  # The emulator's bundled Qt has no wayland plugin, so a QT_QPA_PLATFORM=wayland
+  # inherited from the desktop session would keep the window from opening.
+  # `exec setsid` keeps $! the emulator's pid: a background child of a shell
+  # without job control is no process group leader, so setsid does not fork.
+  (
+    export ANDROID_HOME="$android_sdk_dir" ANDROID_SDK_ROOT="$android_sdk_dir"
+    if [[ "$windowed" -eq 1 ]]; then
+      export QT_QPA_PLATFORM=xcb
+    fi
+    exec setsid "$android_emu" -avd "$avd" -port "$port" \
+      ${flags[@]+"${flags[@]}"} ${extra[@]+"${extra[@]}"}
+  ) </dev/null >"$log" 2>&1 &
+  pid=$!
+
+  for ((i = 0; i < 120; i++)); do
+    devs="$("$android_adb" devices 2>/dev/null)"
+    if grep -q "^${serial}[[:space:]]" <<<"$devs"; then
+      relay_say "$serial"
+      return 0
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      relay_warn "ccc: the emulator for $avd exited during startup; end of $log:"
+      tail -n 20 "$log" | sed 's/^/e   /'
+      return 1
+    fi
+    sleep 0.5
+  done
+  relay_warn "ccc: adb has not seen $serial after 60s; the emulator is still starting (log: $log on the host)"
+  relay_say "$serial"
+}
+
+android_relay() {
+  local line="" out rc=0
+  local -a req=()
+  IFS= read -r -t 10 line || true
+  read -r -a req <<<"$line"
+  if ! android_sdk_dir="$(android_sdk)"; then
+    relay_warn "ccc: no Android SDK with an emulator on the host (set CCC_ANDROID_SDK)"
+    printf 'x 1\n'
+    return
+  fi
+  android_emu="$android_sdk_dir/emulator/emulator"
+  android_adb="$android_sdk_dir/platform-tools/adb"
+  [[ -x "$android_adb" ]] || android_adb=adb
+  mkdir -p "$android_cache"
+  case "${req[0]:-}" in
+    list)
+      android_avds | sed 's/^/o /' ;;
+    version)
+      out="$("$android_emu" -version 2>/dev/null)"
+      grep -m 1 'Android emulator version' <<<"$out" | sed 's/^/o /' || rc=1 ;;
+    adb-server)
+      android_ensure_adb || rc=$? ;;
+    start)
+      android_start "${req[@]:1}" || rc=$? ;;
+    *)
+      relay_warn "ccc: unknown request '${req[0]:-}'"
+      rc=2 ;;
+  esac
+  printf 'x %d\n' "$rc"
+}
+
+# Hidden entry point, one invocation per connection, stdin/stdout wired to it.
+# errexit is off so that every request ends with its "x" line.
+if [[ "${1:-}" == "--internal-android-relay" ]]; then
+  set +e
+  android_relay
+  exit 0
+fi
+
+# socat splits an EXEC command line on single spaces and reads ',' as an option
+# separator and '!!' as an address separator, so such paths cannot be handed
+# to it safely.
+socat_safe() {
+  [[ "$1" != *[[:space:],]* && "$1" != *'!!'* ]]
+}
+
 usage() {
   cat <<'EOF'
 ccc - run Claude Code in a Docker container
@@ -157,6 +382,8 @@ ccc flags (consumed by the wrapper, not forwarded):
                        so the first chrome MCP tool call pays no cold start
   --no-chrome          do not front 127.0.0.1:9222 with the lazy chrome broker
                        (chrome-devtools-mcp tools then have nothing to attach to)
+  --no-android         no android emulator relay and no mobile-mcp for this
+                       session
   -h, --help           show this help and exit
 
 Anything else is forwarded to `claude` (which always runs with
@@ -164,9 +391,14 @@ Anything else is forwarded to `claude` (which always runs with
 explicitly: `ccc --mount-parent -- --print "query"`.
 
 Environment:
-  CCC_IMAGE    override the docker image name (default: claude-docker)
-  CCC_CHROME   chrome binary to launch (default: the first of
-               google-chrome-stable, google-chrome, chromium on PATH)
+  CCC_IMAGE          override the docker image name (default: claude-docker)
+  CCC_CHROME         chrome binary to launch (default: the first of
+                     google-chrome-stable, google-chrome, chromium on PATH)
+  CCC_ANDROID_SDK    host Android SDK for the emulator relay (default: the
+                     first of $ANDROID_HOME, $ANDROID_SDK_ROOT, ~/Android/Sdk,
+                     /opt/android/sdk, /opt/android-sdk with an emulator)
+  CCC_EMULATOR_ARGS  extra flags for every emulator the relay starts, e.g.
+                     "-gpu swiftshader" (not subject to the allow-list)
 
 Chrome on demand:
   ccc puts a lazy broker (socat) on 127.0.0.1:9222, the address the
@@ -176,6 +408,15 @@ Chrome on demand:
   the chrome MCP is always usable and chrome only opens when it is actually
   used. Both chrome and the broker are left running when ccc exits. Needs
   socat on the host and --network host (the default).
+
+Android emulators on demand:
+  Emulators run on the host, with their window on the host's desktop; adb,
+  flutter and mobile-mcp in the container use the host's adb server. Inside,
+  `ccc-emulator start [AVD]` (or `emulator -avd AVD`, `flutter emulators
+  --launch AVD`) asks ccc over a per-session socket to start one; ccc also
+  starts the host's adb server when needed. Emulators keep running when ccc
+  exits. Needs an Android SDK with the emulator and socat on the host and
+  --network host (the default).
 EOF
 }
 
@@ -188,6 +429,7 @@ mount_cache=1
 mount_claude_temp=1
 chrome_enabled=1
 chrome_eager=0
+android_enabled=1
 limit_cpu=1
 limit_memory=1
 extra_mounts=()
@@ -232,6 +474,7 @@ while [[ $# -gt 0 ]]; do
     --shell)            do_shell=1; shift ;;
     --chrome)           chrome_eager=1; shift ;;
     --no-chrome)        chrome_enabled=0; shift ;;
+    --no-android)       android_enabled=0; shift ;;
     -h|--help)          usage; exit 0 ;;
     --)                 shift; forwarded_args+=("$@"); break ;;
     *)                  forwarded_args+=("$1"); shift ;;
@@ -267,7 +510,7 @@ fi
 # is the port to start chrome on now, or empty when there is nothing to do.
 if [[ "$chrome_enabled" -eq 1 ]]; then
   eager_port="$chrome_debug_port"
-  if chrome_port_busy "$chrome_broker_port"; then
+  if port_busy "$chrome_broker_port"; then
     # A chrome of the user's own, or a broker from a sibling session, already
     # serves the address the container talks to. Leave it alone and use it.
     eager_port=""
@@ -282,10 +525,7 @@ if [[ "$chrome_enabled" -eq 1 ]]; then
     # by putting chrome straight onto the port the container attaches to.
     echo "ccc: socat not found — chrome-on-demand disabled (pacman -S socat); --chrome still works" >&2
     eager_port="$chrome_broker_port"
-  elif [[ "$self" == *[[:space:],]* || "$self" == *'!!'* ]]; then
-    # socat splits an EXEC command line on single spaces and reads ',' as an
-    # option separator and '!!' as an address separator, so such a path cannot
-    # be handed to it safely.
+  elif ! socat_safe "$self"; then
     echo "ccc: script path '$self' contains a space, comma or '!!' — chrome-on-demand disabled" >&2
     eager_port=""
   else
@@ -384,13 +624,18 @@ if [[ "$mount_claude_temp" -eq 1 ]]; then
     host_tmp="${host_tmp%/}"
     claude_temp_src="${host_tmp:-/tmp}/claude-$(id -u)/$claude_temp_slug"
     claude_temp_dst="/tmp/claude-$(id -u)"
-    if (umask 077 && mkdir -p -- "$claude_temp_src") 2>/dev/null; then
+    (umask 077 && mkdir -p -- "$claude_temp_src") 2>/dev/null || true
+    if [[ ! -d "$claude_temp_src" ]]; then
+      echo "ccc: cannot create $claude_temp_src — claude temp dir not mounted" >&2
+    # A sibling `docker run -v <scratchpad>/…` from inside ccc makes the host
+    # daemon create missing sources root-owned.
+    elif [[ ! -w "$claude_temp_src" || ! -x "$claude_temp_src" ]]; then
+      echo "ccc: $claude_temp_src is not writable (root-owned?) — claude temp dir not mounted; fix: sudo rm -rf '$claude_temp_src'" >&2
+    else
       docker_args+=(
         --tmpfs "$claude_temp_dst:uid=$(id -u),gid=$(id -g),mode=0700"
         -v "$claude_temp_src:$claude_temp_dst/$claude_temp_slug"
       )
-    else
-      echo "ccc: cannot create $claude_temp_src — claude temp dir not mounted" >&2
     fi
   fi
 fi
@@ -416,7 +661,12 @@ if [[ "$mount_cache" -eq 1 ]]; then
 fi
 
 if [[ "$host_net" -eq 1 ]]; then
-  docker_args+=( --network host )
+  # adb counts tcp:localhost as a local server and tcp:127.0.0.1 as a remote
+  # one, and never forks a remote server itself. Left local, adb in the
+  # container would start its own server whenever the host's isn't up — on the
+  # host's 5037, dying with the container, holding the image's adbkey instead
+  # of the one the host's devices trust.
+  docker_args+=( --network host -e ADB_SERVER_SOCKET=tcp:127.0.0.1:5037 )
 else
   docker_args+=( --add-host=host.docker.internal:host-gateway )
 fi
@@ -469,6 +719,11 @@ elif [[ -f "$HOME/.gitconfig" ]]; then
   docker_args+=( -v "$HOME/.gitconfig:$container_home/.gitconfig:ro" )
 fi
 
+# Without the host's debug key gradle makes a new one per container, and
+# installing over a build signed by the previous one fails with
+# INSTALL_FAILED_UPDATE_INCOMPATIBLE.
+[[ -f "$HOME/.android/debug.keystore" ]] && docker_args+=( -v "$HOME/.android/debug.keystore:$container_home/.android/debug.keystore:ro" )
+
 [[ -f /etc/vimrc ]]           && docker_args+=( -v "/etc/vimrc:/etc/vimrc:ro" )
 [[ -f /etc/vim/vimrc ]]       && docker_args+=( -v "/etc/vim/vimrc:/etc/vim/vimrc:ro" )
 [[ -f "$HOME/.vimrc" ]]       && docker_args+=( -v "$HOME/.vimrc:$container_home/.vimrc:ro" )
@@ -507,10 +762,15 @@ fi
 # named pipe crosses the container boundary — no dbus socket is exposed.
 notify_pid=""
 notify_dir=""
-cleanup_notify() {
+android_pid=""
+android_dir=""
+cleanup() {
   [[ -n "$notify_pid" ]] && kill "$notify_pid" 2>/dev/null || true
   [[ -n "$notify_dir" ]] && rm -rf "$notify_dir"
+  [[ -n "$android_pid" ]] && kill "$android_pid" 2>/dev/null || true
+  [[ -n "$android_dir" ]] && rm -rf "$android_dir"
 }
+trap cleanup EXIT
 if command -v notify-send >/dev/null 2>&1; then
   notify_dir="$(mktemp -d --tmpdir ccc-notify-XXXXXX)"
   notify_fifo="$notify_dir/fifo"
@@ -524,8 +784,35 @@ if command -v notify-send >/dev/null 2>&1; then
     done
   ) &
   notify_pid=$!
-  trap cleanup_notify EXIT
   docker_args+=( -v "$notify_fifo:/run/ccc-notify.fifo" )
+fi
+
+# Android emulator relay (see the top of this file). Silent on hosts without
+# an SDK; one line when there is one but the relay cannot work. The directory
+# is mounted rather than the socket, which socat may not have created yet when
+# docker resolves the mount.
+if [[ "$android_enabled" -eq 1 ]] && android_sdk >/dev/null; then
+  if [[ "$host_net" -eq 0 ]]; then
+    echo "ccc: --net given — android emulators need host loopback for adb, relay disabled" >&2
+  elif ! command -v socat >/dev/null 2>&1; then
+    echo "ccc: socat not found — android emulator relay disabled (pacman -S socat)" >&2
+  elif ! socat_safe "$self" || ! socat_safe "${TMPDIR:-/tmp}"; then
+    echo "ccc: '$self' or \$TMPDIR contains a space, comma or '!!' — android emulator relay disabled" >&2
+  else
+    android_dir="$(mktemp -d --tmpdir ccc-android-XXXXXX)"
+    mkdir -p "$android_cache"
+    socat "UNIX-LISTEN:$android_dir/sock,fork" "EXEC:$self --internal-android-relay" \
+      </dev/null >/dev/null 2>>"$android_cache/relay.log" &
+    android_pid=$!
+    docker_args+=( -v "$android_dir:/run/ccc-android" )
+    # adb emu (stop, avd name) authenticates to the emulator console with this
+    # token, read on the client side.
+    [[ -f "$HOME/.emulator_console_auth_token" ]] \
+      && docker_args+=( -v "$HOME/.emulator_console_auth_token:$container_home/.emulator_console_auth_token:ro" )
+    # Only for the display names in `flutter emulators`.
+    avd_home="${ANDROID_AVD_HOME:-$HOME/.android/avd}"
+    [[ -d "$avd_home" ]] && docker_args+=( -v "$avd_home:$container_home/.android/avd:ro" )
+  fi
 fi
 
 if [[ -t 0 && -t 1 ]]; then

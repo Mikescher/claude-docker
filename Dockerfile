@@ -178,6 +178,14 @@ if [[ -f "$mcp_cfg" ]] && ! grep -q 'browser-url' "$mcp_cfg"; then
     || { rm -f "$tmp"; echo "ccc-entrypoint: failed to patch chrome-devtools-mcp config" >&2; }
 fi
 
+# mobile-mcp drives the host's Android emulators, so it is only registered
+# when ccc mounted its emulator relay. --mcp-config is variadic: it must be
+# followed by an option, or it would swallow a prompt as a second config.
+mobile_mcp_cfg=/etc/ccc/mobile-mcp.json
+if [[ "${1:-}" == claude && "${2:-}" == -* && -d /run/ccc-android && -f "$mobile_mcp_cfg" ]]; then
+  set -- "$1" --mcp-config "$mobile_mcp_cfg" "${@:2}"
+fi
+
 exec "$@"
 EOF
 
@@ -301,6 +309,269 @@ unset NPM_CONFIG_PREFIX
 # Visual marker so it's obvious which terminal is inside the claude-docker container.
 PS1='[\u@\[\e[91m\]\h\[\e[0m\] \W | \[\e[96m\]\[\e[0m\]  ] '
 EOF
+
+# Android emulators on demand — the image side of ccc's emulator relay (see
+# the top of ccc). Kept late so that changing it doesn't rebuild the
+# toolchain; the root-owned files are written in a USER root block.
+RUN npm install -g @mobilenext/mobile-mcp
+
+USER root
+
+RUN cat > /usr/local/bin/ccc-emulator <<'EOF' && chmod +x /usr/local/bin/ccc-emulator && ln -s ccc-emulator /usr/local/bin/emulator
+#!/usr/bin/env bash
+# Container side of ccc's emulator relay: emulators run on the host and are
+# started through /run/ccc-android/sock; everything else is plain adb against
+# the host's adb server. Installed as `emulator` too, where it speaks the part
+# of the real emulator CLI that flutter uses.
+set -euo pipefail
+
+sock=/run/ccc-android/sock
+me=ccc-emulator
+export ADB_SERVER_SOCKET="${ADB_SERVER_SOCKET:-tcp:127.0.0.1:5037}"
+
+die() {
+  echo "$me: $*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'USAGE'
+ccc-emulator - Android emulators on the host, driven from this container
+
+  ccc-emulator list                    AVDs installed on the host
+  ccc-emulator start [AVD] [options]   start AVD on the host, wait for it to
+                                       boot, print its adb serial
+      --headless   no window on the host's desktop (-no-window)
+      --cold       cold boot, skip the snapshot (-no-snapshot-load)
+      --wipe       factory-reset the AVD's data first (-wipe-data)
+      --no-wait    return as soon as adb sees the device
+      -- FLAGS     more emulator flags, from the host's allow-list
+  ccc-emulator stop [SERIAL|AVD|--all] shut an emulator down
+  ccc-emulator status                  devices known to the host's adb server
+  ccc-emulator adb-server              start the host's adb server (USB devices)
+
+adb, flutter and mobile-mcp here use the host's adb server. `emulator
+-list-avds`, `emulator -avd AVD` and `flutter emulators --launch AVD` go
+through the same relay.
+USAGE
+}
+
+relay() {
+  local a
+  [[ -S "$sock" ]] || die "no emulator relay in this session (needs ccc with host networking, socat and an Android SDK on the host, and no --no-android)"
+  for a in "$@"; do
+    [[ "$a" =~ ^[A-Za-z0-9._@:-]+$ ]] || die "invalid argument '$a'"
+  done
+  /usr/bin/python3 - "$sock" "$*" <<'PY'
+import socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+try:
+    s.connect(sys.argv[1])
+except OSError as e:
+    sys.exit(f"ccc-emulator: emulator relay not reachable: {e}")
+s.sendall(sys.argv[2].encode() + b"\n")
+rc = 1
+for raw in s.makefile("rb"):
+    tag, _, text = raw.decode(errors="replace").rstrip("\n").partition(" ")
+    if tag == "o":
+        print(text, flush=True)
+    elif tag == "e":
+        print(text, file=sys.stderr, flush=True)
+    elif tag == "x":
+        rc = int(text)
+sys.exit(rc)
+PY
+}
+
+require_adb_server() {
+  adb devices >/dev/null 2>&1 \
+    || die "no adb server on the host — 'ccc-emulator start' or 'ccc-emulator adb-server' starts one"
+}
+
+emulator_serials() {
+  adb devices | awk 'NR > 1 && $1 ~ /^emulator-/ { print $1 }'
+}
+
+# The console answers with the AVD name; without its auth token the props are
+# the fallback (ro.boot.qemu.* since API 31, ro.kernel.qemu.* before).
+avd_name() {
+  local n
+  n="$(adb -s "$1" emu avd name 2>/dev/null | head -n 1 | tr -d '\r')" || true
+  if [[ -z "$n" || "$n" == KO* ]]; then
+    n="$(adb -s "$1" shell 'getprop ro.boot.qemu.avd_name; getprop ro.kernel.qemu.avd_name' 2>/dev/null \
+      | tr -d '\r' | grep -m 1 .)" || true
+  fi
+  printf '%s\n' "$n"
+}
+
+cmd_start() {
+  local avd="" wait=1 out serial
+  local -a flags=() avds=()
+  while (($#)); do
+    case "$1" in
+      --headless) flags+=(-no-window) ;;
+      --cold)     flags+=(-no-snapshot-load) ;;
+      --wipe)     flags+=(-wipe-data) ;;
+      --no-wait)  wait=0 ;;
+      --)         shift; flags+=("$@"); break ;;
+      -*)         die "unknown option '$1' (emulator flags go after --)" ;;
+      *)
+        [[ -z "$avd" ]] || die "only one AVD at a time"
+        avd="$1" ;;
+    esac
+    shift
+  done
+  if [[ -z "$avd" ]]; then
+    out="$(relay list)"
+    [[ -n "$out" ]] || die "no AVDs on the host"
+    mapfile -t avds <<<"$out"
+    ((${#avds[@]} == 1)) || die "several AVDs on the host, name one: ${avds[*]}"
+    avd="${avds[0]}"
+  fi
+  out="$(relay start "$avd" ${flags[@]+"${flags[@]}"})"
+  serial="$(tail -n 1 <<<"$out")"
+  if [[ "$wait" -eq 1 ]]; then
+    echo "$me: waiting for $serial to finish booting" >&2
+    timeout 300 adb -s "$serial" wait-for-device shell \
+      'while [ "$(getprop sys.boot_completed)" != 1 ]; do sleep 1; done' \
+      || die "$serial did not finish booting within 300s"
+  fi
+  printf '%s\n' "$serial"
+}
+
+cmd_stop() {
+  local target="${1:-}" s
+  local -a running=() serials=()
+  require_adb_server
+  mapfile -t running < <(emulator_serials)
+  case "$target" in
+    "")
+      ((${#running[@]} == 1)) || die "${#running[@]} emulators running — name a serial or AVD, or use --all"
+      serials=("${running[0]}") ;;
+    --all)
+      serials=(${running[@]+"${running[@]}"}) ;;
+    emulator-*)
+      serials=("$target") ;;
+    *)
+      for s in ${running[@]+"${running[@]}"}; do
+        if [[ "$(avd_name "$s")" == "$target" ]]; then
+          serials+=("$s")
+        fi
+      done
+      ((${#serials[@]})) || die "no running emulator for AVD '$target'" ;;
+  esac
+  for s in ${serials[@]+"${serials[@]}"}; do
+    if adb -s "$s" emu kill 2>&1 | grep -q 'OK: killing'; then
+      echo "stopped $s"
+    elif adb -s "$s" shell reboot -p >/dev/null 2>&1; then
+      echo "powering off $s"
+    else
+      echo "$me: could not stop $s" >&2
+    fi
+  done
+}
+
+cmd_status() {
+  local devs serial state name booted
+  devs="$(adb devices 2>/dev/null)" \
+    || die "no adb server on the host — 'ccc-emulator start' or 'ccc-emulator adb-server' starts one"
+  printf '%-16s %-12s %-24s %s\n' SERIAL STATE AVD BOOTED
+  while read -r serial state _; do
+    [[ -n "$serial" ]] || continue
+    name=- booted=-
+    if [[ "$serial" == emulator-* ]]; then
+      name="$(avd_name "$serial")"
+    fi
+    if [[ "$state" == device ]]; then
+      booted="$(adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" || true
+      if [[ "$booted" == 1 ]]; then booted=yes; else booted=no; fi
+    fi
+    printf '%-16s %-12s %-24s %s\n' "$serial" "$state" "${name:--}" "$booted"
+  done < <(tail -n +2 <<<"$devs")
+}
+
+# Flutter runs `emulator -list-avds` (one name per line on stdout),
+# `emulator -version` for doctor, and `emulator -avd ID [-no-snapshot-load]`,
+# where exit 0 at any time means launched and non-zero within 3s means failed.
+emulator_cli() {
+  local avd="" serial
+  local -a flags=()
+  (($#)) || die "usage: emulator -list-avds | -version | -avd NAME [flags] (ccc shim, see ccc-emulator -h)"
+  while (($#)); do
+    case "$1" in
+      -list-avds) relay list; return ;;
+      -version)   relay version; return ;;
+      -help|-h|--help)
+        echo "ccc shim for the host's emulator: -list-avds | -version | -avd NAME [flags]; see ccc-emulator -h"
+        return ;;
+      -avd)
+        (($# >= 2)) || die "-avd needs a name"
+        avd="$2"
+        shift ;;
+      @*) avd="${1#@}" ;;
+      -gpu|-memory|-cores|-port)
+        (($# >= 2)) || die "$1 needs a value"
+        flags+=("$1" "$2")
+        shift ;;
+      *) flags+=("$1") ;;
+    esac
+    shift
+  done
+  [[ -n "$avd" ]] || die "no AVD given (-avd NAME)"
+  serial="$(relay start "$avd" ${flags[@]+"${flags[@]}"})"
+  echo "INFO    | ccc: $avd is running on the host as $serial"
+}
+
+if [[ "$(basename -- "$0")" == emulator ]]; then
+  me=emulator
+  emulator_cli "$@"
+  exit
+fi
+
+case "${1:-help}" in
+  list)            relay list ;;
+  start)           shift; cmd_start "$@" ;;
+  stop)            shift; cmd_stop "$@" ;;
+  status)          cmd_status ;;
+  adb-server)      relay adb-server ;;
+  help|-h|--help)  usage ;;
+  *)               usage >&2; exit 1 ;;
+esac
+EOF
+
+# Registered by ccc-entrypoint, only in sessions with the emulator relay. It
+# runs on the system node because a project's .nvmrc may select one older than
+# the node >= 20 it needs.
+RUN mkdir -p /etc/ccc \
+ && js="$(readlink -f /home/${USERNAME}/.npm-global/bin/mcp-server-mobile)" \
+ && test -f "$js" \
+ && jq -n --arg js "$js" \
+      '{mcpServers: {"mobile-mcp": {type: "stdio", command: "/usr/bin/node", args: [$js], env: {MOBILEMCP_DISABLE_TELEMETRY: "1"}}}}' \
+      > /etc/ccc/mobile-mcp.json
+
+# Managed-policy memory: loaded into every claude session in the container,
+# alongside the user's and the project's CLAUDE.md.
+RUN mkdir -p /etc/claude-code && cat > /etc/claude-code/CLAUDE.md <<'EOF'
+# Container environment (ccc)
+
+This session runs inside the ccc Docker container; the workspace is mounted at the same absolute path as on the host.
+
+- `docker` talks to the host's daemon: containers you start are siblings, and bind-mount sources are host paths (the same as the workspace paths here).
+- Host networking: services on the host's 127.0.0.1 are reachable as localhost.
+- The chrome-devtools MCP drives a Chrome window on the host; it opens on the first browser tool call.
+
+## Android
+Emulators run on the host, not in this container. `adb`, flutter and the mobile-mcp tools talk to the host's adb server, so `adb install`, `adb exec-out screencap -p > shot.png`, `flutter run` and mobile-mcp (screenshots, element list, tap/type/swipe, app install/launch) work against them as usual.
+- `ccc-emulator list` shows the host's AVDs; `ccc-emulator start [AVD]` starts one, waits until it has booted and prints its serial; `ccc-emulator stop` / `ccc-emulator status`. `emulator -list-avds`, `emulator -avd AVD` and `flutter emulators --launch AVD` take the same path.
+- The emulator window opens on the user's desktop; use `--headless` only when asked to.
+- If adb cannot reach its daemon, run `ccc-emulator adb-server`. adb here never starts a server of its own.
+EOF
+
+USER ${USERNAME}
+
+# Where flutter looks for the emulator binary.
+RUN mkdir -p "$ANDROID_HOME/emulator" \
+ && ln -s /usr/local/bin/ccc-emulator "$ANDROID_HOME/emulator/emulator"
 
 RUN curl -fsSL https://claude.ai/install.sh | bash -s "${CLAUDE_VERSION}" \
  && /home/${USERNAME}/.local/bin/claude --version

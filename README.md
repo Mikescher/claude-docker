@@ -9,6 +9,7 @@ A small helper script which allows me to quickly start a containerized claude co
 - `--shell`: Run a bash shell instead of claude-code
 - `--chrome`: Start the host chrome right away instead of on first use
 - `--no-chrome`: Do not front `127.0.0.1:9222` with the lazy chrome broker
+- `--no-android`: No android emulator relay and no mobile-mcp
 
 ## Installed tools
 
@@ -16,6 +17,7 @@ A small helper script which allows me to quickly start a containerized claude co
 - golang development tools
 - dotnet development tools
 - java
+- Android SDK + Flutter
 - node (plus automatic nvm)
 - python
 - Docker (docker-in-docker)
@@ -33,6 +35,7 @@ A small helper script which allows me to quickly start a containerized claude co
 
 - Forward `notify-send` to host
 - Chrome for the chrome-devtools MCP starts on first use (needs `socat`)
+- Android emulators run on the host and are started from inside via `ccc-emulator` / `emulator` / `flutter emulators --launch`; mobile-mcp drives them (needs `socat` and an Android SDK with the emulator on the host)
 - Mounts directory at same path in container as it was outside
 - Container user matches user who build image
 - Container name matches directory
