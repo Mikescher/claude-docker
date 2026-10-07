@@ -119,16 +119,24 @@ RUN groupadd -g ${GID} ${USERNAME} \
 # not need build-arg substitution. Written as root before the USER switch.
 RUN cat > /usr/local/bin/ccc-entrypoint <<'EOF' && chmod +x /usr/local/bin/ccc-entrypoint
 #!/usr/bin/env bash
-if [[ -f .nvmrc ]]; then
+# .claude-docker's "node-version" / "java-version" outrank .nvmrc / .java-version.
+cfg_node="" cfg_java=""
+if [[ -f .claude-docker ]]; then
+  cfg_node=$(jq -r '."node-version" // empty' .claude-docker 2>/dev/null)
+  cfg_java=$(jq -r '."java-version" // empty' .claude-docker 2>/dev/null)
+fi
+
+if [[ -n $cfg_node || -f .nvmrc ]]; then
   if [[ -s "$NVM_DIR/nvm.sh" ]]; then
     unset NPM_CONFIG_PREFIX
     . "$NVM_DIR/nvm.sh"
-    nvm install || echo "ccc-entrypoint: nvm install failed; falling back to system node" >&2
+    nvm install ${cfg_node:+"$cfg_node"} || echo "ccc-entrypoint: nvm install failed; falling back to system node" >&2
   fi
 fi
 
-# .java-version (jenv/jabba/sdkman convention): switch the active JDK to match,
-# like .nvmrc does for node. Content is a version such as "25", "21", "17",
+# .java-version (jenv/jabba/sdkman convention) or .claude-docker's
+# "java-version": switch the active JDK to match, like .nvmrc does for node.
+# Content is a version such as "25", "21", "17",
 # "1.8" or a full "25.0.3" — we match on the *major* version against the JDKs
 # installed under /usr/lib/jvm (java-<major>-openjdk and the Temurin builds).
 # A vendor may be named to force a specific build when a major has more than one
@@ -138,8 +146,13 @@ fi
 # On a bad or unmatched version it falls back to the system default, but
 # loudly: an error is printed and the start pauses 2s so the message is seen
 # before claude takes over the terminal.
-if [[ -f .java-version ]]; then
-  raw=$(tr -d '[:space:]' < .java-version)
+java_src=""
+if [[ -n $cfg_java ]]; then
+  java_src=.claude-docker raw=${cfg_java//[[:space:]]/}
+elif [[ -f .java-version ]]; then
+  java_src=.java-version raw=$(tr -d '[:space:]' < .java-version)
+fi
+if [[ -n $java_src ]]; then
   vendor='*'                          # bare version -> first java-<major>-* wins
   case ${raw,,} in
     *temurin*|*-tem) vendor=temurin ;;
@@ -159,7 +172,7 @@ if [[ -f .java-version ]]; then
     export JAVA_HOME="$jdk"
     export PATH="$jdk/bin:$PATH"
   else
-    echo "ccc-entrypoint: no JDK matching .java-version ($raw) installed; keeping system default" >&2
+    echo "ccc-entrypoint: no JDK matching $java_src ($raw) installed; keeping system default" >&2
     sleep 2
   fi
 fi

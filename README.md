@@ -41,6 +41,22 @@ A small helper script which allows me to quickly start a containerized claude co
 - Container name matches directory
 - Auto-check claude-code version on startup
 
+## Project config (`.claude-docker`)
+
+An optional JSON file in the directory `ccc` is started from:
+
+```json
+{
+  "automount": ["../clubscale-adminpanel", "../clubscale-app"],
+  "automount-ro": ["../shared-docs"],
+  "java-version": "21",
+  "node-version": "20"
+}
+```
+
+- `automount` / `automount-ro`: extra directories to mount read-write / read-only (relative to the project dir). `ccc` lists them and asks once `Mount them? [Y/n]` before starting.
+- `java-version` / `node-version`: like `.java-version` / `.nvmrc`, and take precedence over them.
+
 ## Closing Remarks
 
 This is almost 100% only made for me and my setup.  

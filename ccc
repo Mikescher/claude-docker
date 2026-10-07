@@ -400,6 +400,17 @@ Environment:
   CCC_EMULATOR_ARGS  extra flags for every emulator the relay starts, e.g.
                      "-gpu swiftshader" (not subject to the allow-list)
 
+Project config (.claude-docker):
+  A JSON file named .claude-docker in the working directory may contain
+    {"automount": ["../api"], "automount-ro": ["../docs"],
+     "java-version": "21", "node-version": "20"}
+  automount / automount-ro: directories to mount read-write / read-only,
+  relative to the working directory (absolute and ~/ paths work too). ccc
+  lists them and asks once before starting (default: yes; without a terminal
+  they are mounted). Missing directories are skipped.
+  java-version / node-version: like .java-version / .nvmrc, and take
+  precedence over them.
+
 Chrome on demand:
   ccc puts a lazy broker (socat) on 127.0.0.1:9222, the address the
   container's chrome-devtools-mcp attaches to. The first connection starts
@@ -578,6 +589,75 @@ else
   mount_src="$host_pwd"
 fi
 workdir_in="$host_pwd"
+
+# .claude-docker (see usage): ccc handles the mount lists, ccc-entrypoint reads
+# the java/node versions from the same file.
+project_cfg="$host_pwd/.claude-docker"
+if [[ -f "$project_cfg" ]]; then
+  # The host may lack jq; the image always has it.
+  if command -v jq >/dev/null 2>&1; then
+    jq_cmd=(jq)
+  else
+    jq_cmd=(docker run --rm -i --network none --entrypoint jq "$IMAGE")
+  fi
+  if ! cfg_mounts="$("${jq_cmd[@]}" -r '
+      def mounts(key; mode): .[key] // [] | if type == "array" then .[] else . end
+        | if type == "string" then "\(mode) \(.)" else error("\(key): expected path strings") end;
+      mounts("automount"; "rw"), mounts("automount-ro"; "ro")' <"$project_cfg")"; then
+    echo "ccc: cannot read .claude-docker" >&2
+    exit 1
+  fi
+
+  # Docker rejects a second mount on the same target; a rw dir under the
+  # workdir mount is already there, while a ro one still narrows access.
+  declare -A mounted=( ["$mount_src"]=1 )
+  for m in ${extra_mounts[@]+"${extra_mounts[@]}"} ${extra_mounts_ro[@]+"${extra_mounts_ro[@]}"}; do
+    mounted["$m"]=1
+  done
+  auto_mounts=()
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    mode="${line%% *}" entry="${line#* }" p="$entry"
+    case "$p" in
+      \~)    p="$HOME" ;;
+      \~/*)  p="$HOME/${p#\~/}" ;;
+      /*)    ;;
+      *)     p="$host_pwd/$p" ;;
+    esac
+    if ! dir="$(cd -- "$p" &>/dev/null && pwd)"; then
+      echo "ccc: .claude-docker: '$entry' is not a directory — not mounted" >&2
+      continue
+    fi
+    [[ -n "${mounted[$dir]+x}" ]] && continue
+    [[ "$mode" == rw && "$dir" == "$mount_src"/* ]] && continue
+    mounted["$dir"]=1
+    auto_mounts+=("$mode $dir")
+  done <<<"$cfg_mounts"
+
+  if [[ ${#auto_mounts[@]} -gt 0 ]]; then
+    echo "ccc: .claude-docker wants to mount:" >&2
+    printf '  %s\n' "${auto_mounts[@]}" >&2
+    answer=""
+    if [[ -t 0 && -t 2 ]]; then
+      printf "Mount them? [Y/n] " >&2
+      read -r answer </dev/tty || answer=""
+    fi
+    case "${answer,,}" in
+      n|no)
+        echo "ccc: not mounting them" >&2
+        ;;
+      *)
+        for m in "${auto_mounts[@]}"; do
+          if [[ "${m%% *}" == rw ]]; then
+            extra_mounts+=("${m#* }")
+          else
+            extra_mounts_ro+=("${m#* }")
+          fi
+        done
+        ;;
+    esac
+  fi
+fi
 
 container_user=$(docker image inspect --format '{{ .Config.User }}' "$IMAGE" 2>/dev/null || true)
 container_home="/home/${container_user:-dev}"
@@ -766,9 +846,9 @@ android_pid=""
 android_dir=""
 cleanup() {
   [[ -n "$notify_pid" ]] && kill "$notify_pid" 2>/dev/null || true
-  [[ -n "$notify_dir" ]] && rm -rf "$notify_dir"
+  [[ -n "$notify_dir" ]] && rm -rf "$notify_dir" || true
   [[ -n "$android_pid" ]] && kill "$android_pid" 2>/dev/null || true
-  [[ -n "$android_dir" ]] && rm -rf "$android_dir"
+  [[ -n "$android_dir" ]] && rm -rf "$android_dir" || true
 }
 trap cleanup EXIT
 if command -v notify-send >/dev/null 2>&1; then
