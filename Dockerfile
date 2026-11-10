@@ -34,6 +34,7 @@ RUN pacman -Syu --noconfirm --needed \
         jdk-openjdk jdk17-openjdk jdk11-openjdk ant maven \
         dotnet-sdk \
         aspnet-targeting-pack \
+        godot-mono \
         go gopls delve golangci-lint \
         rust rust-analyzer \
         nodejs npm bun \
