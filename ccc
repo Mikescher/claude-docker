@@ -799,6 +799,13 @@ elif [[ -f "$HOME/.gitconfig" ]]; then
   docker_args+=( -v "$HOME/.gitconfig:$container_home/.gitconfig:ro" )
 fi
 
+# gitea-cli (gt): created when missing so a `gt auth login` inside persists.
+# Tokens kept in the host's OS keyring are not reachable from the container;
+# only logins made with --credential-store file work here.
+gt_config="${GITEA_CLI_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gitea-cli}"
+[[ -d "$gt_config" ]] || mkdir -p -m 700 "$gt_config" 2>/dev/null
+[[ -d "$gt_config" ]] && docker_args+=( -v "$gt_config:$container_home/.config/gitea-cli" )
+
 # Without the host's debug key gradle makes a new one per container, and
 # installing over a build signed by the previous one fails with
 # INSTALL_FAILED_UPDATE_INCOMPATIBLE.

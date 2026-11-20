@@ -21,7 +21,7 @@ ENV LANG=C.UTF-8 \
     PATH=/home/${USERNAME}/.npm-global/bin:/home/${USERNAME}/.local/bin:/home/${USERNAME}/go/bin:/home/${USERNAME}/.cargo/bin:/home/${USERNAME}/flutter/bin:/home/${USERNAME}/.pub-cache/bin:/home/${USERNAME}/Android/Sdk/cmdline-tools/latest/bin:/home/${USERNAME}/Android/Sdk/platform-tools:/usr/local/bin:/usr/bin:/bin
 
 RUN pacman -Syu --noconfirm --needed \
-        git curl wget openssh \
+        git gitea-cli curl wget openssh \
         ripgrep fd jq tmux less vim nano \
         unzip zip tar which man-db bash-completion \
         shellcheck mkvtoolnix-cli \
