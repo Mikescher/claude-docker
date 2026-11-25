@@ -29,6 +29,7 @@ RUN pacman -Syu --noconfirm --needed \
         cmake pkgconf ninja clang gtk3 mesa-utils \
         docker docker-buildx docker-compose \
         ffmpeg wl-clipboard libpulse \
+        sway xorg-xwayland grim wayvnc xdotool python-pywayland wlr-protocols \
         restic \
         postgresql \
         jdk-openjdk jdk17-openjdk jdk11-openjdk ant maven \
@@ -563,6 +564,731 @@ RUN mkdir -p /etc/ccc \
       '{mcpServers: {"mobile-mcp": {type: "stdio", command: "/usr/bin/node", args: [$js], env: {MOBILEMCP_DISABLE_TELEMETRY: "1"}}}}' \
       > /etc/ccc/mobile-mcp.json
 
+# Headless desktop for GUI apps (see ccc-display). sway ships with a file
+# capability (cap_sys_nice) outside docker's bounding set, which makes every exec
+# of it fail with EPERM, so it is dropped. inputd drives the wlr virtual-pointer
+# and virtual-keyboard protocols through pywayland; Arch ships no bindings for
+# either and no XML for the keyboard one, so its wire format is spelled out
+# here and both are generated. The `wayland` shim makes the generated modules
+# use pywayland's own core classes.
+RUN cat > /tmp/virtual-keyboard-unstable-v1.xml <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="virtual_keyboard_unstable_v1">
+  <interface name="zwp_virtual_keyboard_v1" version="1">
+    <request name="keymap">
+      <arg name="format" type="uint"/>
+      <arg name="fd" type="fd"/>
+      <arg name="size" type="uint"/>
+    </request>
+    <enum name="error">
+      <entry name="no_keymap" value="0"/>
+    </enum>
+    <request name="key">
+      <arg name="time" type="uint"/>
+      <arg name="key" type="uint"/>
+      <arg name="state" type="uint"/>
+    </request>
+    <request name="modifiers">
+      <arg name="mods_depressed" type="uint"/>
+      <arg name="mods_latched" type="uint"/>
+      <arg name="mods_locked" type="uint"/>
+      <arg name="group" type="uint"/>
+    </request>
+    <request name="destroy" type="destructor" since="1"/>
+  </interface>
+  <interface name="zwp_virtual_keyboard_manager_v1" version="1">
+    <enum name="error">
+      <entry name="unauthorized" value="0"/>
+    </enum>
+    <request name="create_virtual_keyboard">
+      <arg name="seat" type="object" interface="wl_seat"/>
+      <arg name="id" type="new_id" interface="zwp_virtual_keyboard_v1"/>
+    </request>
+  </interface>
+</protocol>
+EOF
+
+RUN setcap -r /usr/bin/sway \
+ && mkdir -p /usr/local/lib/ccc-display/cccproto \
+ && python3 -m pywayland.scanner -o /tmp/wlproto -i /usr/share/wayland/wayland.xml \
+      /usr/share/wlr-protocols/unstable/wlr-virtual-pointer-unstable-v1.xml \
+      /tmp/virtual-keyboard-unstable-v1.xml \
+ && mv /tmp/wlproto/wlr_virtual_pointer_unstable_v1.py /tmp/wlproto/virtual_keyboard_unstable_v1.py \
+      /usr/local/lib/ccc-display/cccproto/ \
+ && rm -rf /tmp/wlproto /tmp/virtual-keyboard-unstable-v1.xml \
+ && touch /usr/local/lib/ccc-display/cccproto/__init__.py \
+ && echo 'from pywayland.protocol.wayland import *  # noqa: F401,F403' > /usr/local/lib/ccc-display/cccproto/wayland.py
+
+RUN cat > /usr/local/lib/ccc-display/inputd.py <<'EOF'
+#!/usr/bin/env python3
+# Holds one virtual pointer and one virtual keyboard open for the life of the
+# display. A headless sway has no input devices, and clients only bind
+# wl_pointer/wl_keyboard while the seat advertises them. Takes one command per
+# line on a unix socket and answers "ok" or "err <reason>":
+#   move X Y W H | down BTN | up BTN | scroll N | sleep MS
+#   type JSON-STRING | key COMBO          (COMBO like ctrl+shift+Tab, Return, a)
+# W H is the output size, which absolute motion is scaled against.
+import json
+import os
+import re
+import socket
+import sys
+import time
+
+sys.path.insert(0, "/usr/local/lib/ccc-display")
+
+from pywayland.client import Display
+from pywayland.protocol.wayland import WlSeat
+from cccproto.wlr_virtual_pointer_unstable_v1 import ZwlrVirtualPointerManagerV1
+from cccproto.virtual_keyboard_unstable_v1 import ZwpVirtualKeyboardManagerV1
+
+BUTTONS = {"left": 0x110, "right": 0x111, "middle": 0x112}  # linux/input-event-codes.h
+AXIS_VERTICAL = 0
+SOURCE_WHEEL = 0
+
+# Real keyboards put ASCII at fixed evdev codes, and clients act on those codes:
+# Chromium/Electron drop characters sent on codes they don't know and treat
+# KEY_ESC/KEY_BACKSPACE as those keys whatever the keysym, and shortcuts match
+# on the code. So this is a US layout at the real codes, plus a few spare codes
+# (F13-F24) whose keysyms are swapped in for any other character.
+NAMED = {
+    "Escape": 1, "BackSpace": 14, "Tab": 15, "Return": 28, "space": 57,
+    "F1": 59, "F2": 60, "F3": 61, "F4": 62, "F5": 63, "F6": 64, "F7": 65,
+    "F8": 66, "F9": 67, "F10": 68, "F11": 87, "F12": 88, "KP_Enter": 96,
+    "Print": 99, "Home": 102, "Up": 103, "Page_Up": 104, "Left": 105,
+    "Right": 106, "End": 107, "Down": 108, "Page_Down": 109, "Insert": 110,
+    "Delete": 111, "Menu": 127,
+}
+ALIASES = {"Prior": "Page_Up", "Next": "Page_Down", "Enter": "Return", "Esc": "Escape"}
+CHAR_NAMES = {"\n": "Return", "\t": "Tab", " ": "space"}
+US_ROWS = [
+    (2, "1234567890-=", "!@#$%^&*()_+"),
+    (16, "qwertyuiop[]", "QWERTYUIOP{}"),
+    (30, "asdfghjkl;'`", 'ASDFGHJKL:"~'),
+    (43, "\\zxcvbnm,./", "|ZXCVBNM<>?"),
+]
+US = {}  # char -> (code, shifted)
+for base, lower, upper in US_ROWS:
+    for i, (lo, up) in enumerate(zip(lower, upper)):
+        US[lo] = (base + i, False)
+        US[up] = (base + i, True)
+DYN_CODES = list(range(183, 195))  # KEY_F13..KEY_F24
+SHIFT = 1
+MODS = {"shift": 1, "ctrl": 4, "control": 4, "alt": 8, "super": 64, "logo": 64, "win": 64, "meta": 64}
+
+display = Display()
+display.connect()
+globals_ = {}
+registry = display.get_registry()
+registry.dispatcher["global"] = lambda _r, name, iface, _v: globals_.setdefault(iface, name)
+display.roundtrip()
+for iface in ("zwlr_virtual_pointer_manager_v1", "zwp_virtual_keyboard_manager_v1"):
+    if iface not in globals_:
+        sys.exit(f"ccc-display-inputd: compositor has no {iface}")
+seat = registry.bind(globals_["wl_seat"], WlSeat, 1)
+pointer = registry.bind(globals_["zwlr_virtual_pointer_manager_v1"], ZwlrVirtualPointerManagerV1, 1) \
+    .create_virtual_pointer(seat)
+keyboard = registry.bind(globals_["zwp_virtual_keyboard_manager_v1"], ZwpVirtualKeyboardManagerV1, 1) \
+    .create_virtual_keyboard(seat)
+
+dynamic = []  # keysym names, on DYN_CODES in order
+
+
+def ks(ch):
+    return f"U{ord(ch):04X}"
+
+
+def upload_keymap():
+    keys = [(code, name) for name, code in NAMED.items()]
+    keys += [(base + i, f"{ks(lo)}, {ks(up)}") for base, lower, upper in US_ROWS
+             for i, (lo, up) in enumerate(zip(lower, upper))]
+    keys += [(DYN_CODES[i], sym) for i, sym in enumerate(dynamic)]
+    keycodes = "".join(f"  <K{code}> = {code + 8};\n" for code, _ in keys)
+    symbols = "".join(f"  key <K{code}> {{ [ {syms} ] }};\n" for code, syms in keys)
+    keymap = (
+        "xkb_keymap {\n"
+        f'xkb_keycodes "ccc" {{\n  minimum = 8;\n  maximum = 255;\n{keycodes}}};\n'
+        'xkb_types "ccc" { include "complete" };\n'
+        'xkb_compat "ccc" { include "complete" };\n'
+        f'xkb_symbols "ccc" {{\n{symbols}}};\n'
+        "};\n"
+    ).encode() + b"\0"
+    fd = os.memfd_create("ccc-keymap")
+    try:
+        os.write(fd, keymap)
+        keyboard.keymap(1, fd, len(keymap))  # 1 = WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1
+        display.roundtrip()
+    finally:
+        os.close(fd)
+
+
+def resolve(key):
+    """(code, extra modifier mask) for a character or keysym name; keysyms
+    that have no fixed code must have been placed with place() first."""
+    key = ALIASES.get(key, key)
+    if key in NAMED:
+        return NAMED[key], 0
+    if len(key) == 1:
+        if key in CHAR_NAMES:
+            return NAMED[CHAR_NAMES[key]], 0
+        if key in US:
+            code, shifted = US[key]
+            return code, SHIFT if shifted else 0
+        key = ks(key)
+    return DYN_CODES[dynamic.index(key)], 0
+
+
+def spare_sym(key):
+    """The keysym a key needs on a spare code, or None if it has a fixed one."""
+    key = ALIASES.get(key, key)
+    if key in NAMED or key in CHAR_NAMES or key in US:
+        return None
+    if len(key) == 1:
+        return ks(key)
+    if not re.fullmatch(r"[A-Za-z0-9_]+", key):
+        raise ValueError(f"bad key {key!r}")
+    return key
+
+
+def place(syms):
+    missing = [s for s in dict.fromkeys(syms) if s not in dynamic]
+    if not missing:
+        return
+    if len(dynamic) + len(missing) > len(DYN_CODES):
+        dynamic[:] = list(dict.fromkeys(syms))
+    else:
+        dynamic.extend(missing)
+    upload_keymap()
+
+
+def now():
+    return int(time.monotonic() * 1000) & 0xFFFFFFFF
+
+
+def tap(key, mods=0):
+    code, extra = resolve(key)
+    mods |= extra
+    if mods:
+        keyboard.modifiers(mods, 0, 0, 0)
+    keyboard.key(now(), code, 1)
+    display.roundtrip()
+    time.sleep(0.008)
+    keyboard.key(now(), code, 0)
+    if mods:
+        keyboard.modifiers(0, 0, 0, 0)
+    display.roundtrip()
+    time.sleep(0.008)
+
+
+def type_text(text):
+    # Chunks that fit the spare codes, so each needs at most one keymap swap.
+    chunk, spare = [], set()
+    for ch in text + "\0":
+        sym = spare_sym(ch) if ch != "\0" else None
+        if ch == "\0" or (sym and sym not in spare and len(spare) == len(DYN_CODES)):
+            place(spare)
+            for c in chunk:
+                tap(c)
+            chunk, spare = [], set()
+        if ch != "\0":
+            chunk.append(ch)
+            if sym:
+                spare.add(sym)
+
+
+def press_combo(combo):
+    if combo == "+":
+        mods, key = [], "+"
+    elif combo.endswith("++"):
+        mods, key = combo[:-2].split("+"), "+"
+    else:
+        *mods, key = combo.split("+")
+    mask = 0
+    for m in mods:
+        if m.lower() not in MODS:
+            raise ValueError(f"unknown modifier {m!r}")
+        mask |= MODS[m.lower()]
+    sym = spare_sym(key)
+    if sym:
+        place([sym])
+    tap(key, mask)
+
+
+def run(line):
+    cmd, _, rest = line.strip().partition(" ")
+    args = rest.split()
+    if cmd == "move":
+        x, y, w, h = map(int, args[:4])
+        pointer.motion_absolute(now(), x, y, w, h)
+    elif cmd in ("down", "up"):
+        pointer.button(now(), BUTTONS[args[0]], 1 if cmd == "down" else 0)
+    elif cmd == "scroll":
+        steps = int(args[0])
+        pointer.axis_source(SOURCE_WHEEL)
+        pointer.axis_discrete(now(), AXIS_VERTICAL, 15.0 * steps, steps)
+    elif cmd == "sleep":
+        time.sleep(int(args[0]) / 1000)
+        return
+    elif cmd == "type":
+        type_text(json.loads(rest))
+        return
+    elif cmd == "key":
+        press_combo(rest.strip())
+        return
+    else:
+        raise ValueError(f"unknown command {cmd!r}")
+    pointer.frame()
+    display.roundtrip()
+
+
+upload_keymap()
+server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+server.bind(sys.argv[1])
+server.listen(4)
+while True:
+    conn, _ = server.accept()
+    with conn, conn.makefile("rw") as f:
+        for line in f:
+            try:
+                run(line)
+                f.write("ok\n")
+            except (ValueError, KeyError, IndexError, json.JSONDecodeError) as e:
+                f.write(f"err {e}\n")
+            f.flush()
+EOF
+
+RUN cat > /usr/local/bin/ccc-display <<'EOF' && chmod +x /usr/local/bin/ccc-display
+#!/usr/bin/env bash
+# A headless Wayland desktop in the container: sway on the headless backend
+# with XWayland, so native Wayland and X11 apps (Swing, …) both run here
+# without a window on the host, plus the means to see and drive them.
+set -euo pipefail
+
+me=ccc-display
+dir=/tmp/ccc-display
+lib=/usr/local/lib/ccc-display
+default_size=1440x900
+
+die() {
+  echo "$me: $*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'USAGE'
+ccc-display - headless desktop (sway + XWayland) for GUI apps in this container
+
+  ccc-display start [WxH]              start it (default 1440x900), idempotent
+  ccc-display stop | status
+  ccc-display env                      export lines for the display, for eval
+  ccc-display run CMD...               run CMD on the display, in the foreground
+  ccc-display launch CMD...            start CMD detached, print its pid and log
+  ccc-display wait-window REGEX [SEC]  wait (default 60s) for a matching window
+
+  ccc-display windows                  id, shell, app, focus, geometry, title
+  ccc-display focus ID|REGEX
+  ccc-display close ID|REGEX           ask the window to close (like its X button)
+  ccc-display screenshot [FILE] [--window ID|REGEX]   print the PNG's path
+
+  ccc-display click X Y [left|right|middle] [--double]
+  ccc-display move X Y
+  ccc-display drag X1 Y1 X2 Y2
+  ccc-display scroll X Y N             N wheel steps, negative scrolls up
+  ccc-display type TEXT                into the focused window
+  ccc-display key COMBO...             e.g. Return, ctrl+s, alt+F4, shift+Tab
+
+  ccc-display vnc                      serve the screen on 127.0.0.1 over VNC
+
+Coordinates are screen pixels, the same as in a full screenshot. REGEX
+matches window titles. Keys go through xdotool to XWayland windows and through
+a virtual keyboard to Wayland ones.
+USAGE
+}
+
+running() {
+  [[ -f "$dir/sway.pid" ]] && kill -0 "$(<"$dir/sway.pid")" 2>/dev/null
+}
+
+require() {
+  running || die "the display is not running — 'ccc-display start' first"
+}
+
+load_env() {
+  export XDG_RUNTIME_DIR="$dir"
+  WAYLAND_DISPLAY="$(<"$dir/wayland-display")"
+  DISPLAY="$(<"$dir/x-display")"
+  SWAYSOCK="$(<"$dir/swaysock")"
+  export WAYLAND_DISPLAY DISPLAY SWAYSOCK
+  # Java's AWT draws empty grey windows under a non-reparenting window manager.
+  export _JAVA_AWT_WM_NONREPARENTING=1
+}
+
+wait_for() {
+  local what="$1" i
+  shift
+  for ((i = 0; i < 100; i++)); do
+    "$@" && return 0
+    running || die "sway exited while waiting for $what, see $dir/sway.log"
+    sleep 0.1
+  done
+  die "timed out waiting for $what, see $dir/sway.log"
+}
+
+has_file() {
+  compgen -G "$1" >/dev/null
+}
+
+cmd_start() {
+  local size="${1:-$default_size}" sock
+  [[ "$size" =~ ^[0-9]+x[0-9]+$ ]] || die "size must be WIDTHxHEIGHT, e.g. 1440x900"
+  if running; then
+    cmd_env
+    return
+  fi
+  rm -rf "$dir"
+  mkdir -m 700 "$dir"
+  cat >"$dir/sway.conf" <<CONF
+output HEADLESS-1 resolution $size position 0 0
+swaybg_command -
+xwayland force
+for_window [all] floating enable
+exec sh -c 'printf "%s\\n" "\$DISPLAY" > $dir/x-display'
+CONF
+  # Without WAYLAND_DISPLAY/DISPLAY from the host session sway cannot mistake
+  # itself for a nested compositor; the backend is pinned anyway.
+  env -u WAYLAND_DISPLAY -u DISPLAY XDG_RUNTIME_DIR="$dir" \
+    WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1 \
+    setsid sway -c "$dir/sway.conf" </dev/null >"$dir/sway.log" 2>&1 &
+  echo $! >"$dir/sway.pid"
+
+  wait_for "the sway IPC socket" has_file "$dir/sway-ipc.*.sock"
+  sock="$(compgen -G "$dir/sway-ipc.*.sock" | head -n 1)"
+  echo "$sock" >"$dir/swaysock"
+  wait_for "the Wayland socket" has_file "$dir/wayland-[0-9]*.lock"
+  basename "$(compgen -G "$dir/wayland-[0-9]*.lock" | head -n 1)" .lock >"$dir/wayland-display"
+  wait_for "XWayland" test -s "$dir/x-display"
+
+  load_env
+  setsid /usr/bin/python3 "$lib/inputd.py" "$dir/input.sock" </dev/null >"$dir/inputd.log" 2>&1 &
+  echo $! >"$dir/inputd.pid"
+  wait_for "the virtual input devices" test -S "$dir/input.sock"
+  # XWayland drops the modifiers of the first XTEST key it ever gets.
+  xdotool key shift >/dev/null 2>&1 || true
+  cmd_env
+}
+
+cmd_stop() {
+  local f
+  for f in vnc inputd sway; do
+    [[ -f "$dir/$f.pid" ]] && kill "$(<"$dir/$f.pid")" 2>/dev/null || true
+  done
+  rm -f "$dir"/*.pid
+  echo "stopped"
+}
+
+cmd_env() {
+  require
+  load_env
+  printf 'export XDG_RUNTIME_DIR=%q\n' "$XDG_RUNTIME_DIR"
+  printf 'export WAYLAND_DISPLAY=%q\n' "$WAYLAND_DISPLAY"
+  printf 'export DISPLAY=%q\n' "$DISPLAY"
+  printf 'export SWAYSOCK=%q\n' "$SWAYSOCK"
+  printf 'export _JAVA_AWT_WM_NONREPARENTING=1\n'
+}
+
+output_size() {
+  swaymsg -r -t get_outputs | jq -r '.[0].current_mode | "\(.width) \(.height)"'
+}
+
+cmd_status() {
+  if ! running; then
+    echo "not running"
+    return
+  fi
+  load_env
+  echo "running: $(output_size | tr ' ' x), WAYLAND_DISPLAY=$WAYLAND_DISPLAY DISPLAY=$DISPLAY"
+  if [[ -f "$dir/vnc.port" ]] && kill -0 "$(<"$dir/vnc.pid")" 2>/dev/null; then
+    echo "vnc: 127.0.0.1:$(<"$dir/vnc.port")"
+  fi
+  cmd_windows
+}
+
+tree_windows() {
+  swaymsg -r -t get_tree | jq -c '
+    recurse(.nodes[]?, .floating_nodes[]?)
+    | select((.type == "con" or .type == "floating_con") and .pid != null)
+    | {id, shell, focused, rect, title: (.name // ""),
+       app: (.app_id // .window_properties.class // "")}'
+}
+
+cmd_windows() {
+  require
+  load_env
+  {
+    printf 'ID\tSHELL\tAPP\tFOCUS\tX,Y WxH\tTITLE\n'
+    tree_windows | jq -r '[.id, .shell, .app, (if .focused then "*" else "" end),
+      "\(.rect.x),\(.rect.y) \(.rect.width)x\(.rect.height)", .title] | @tsv'
+  } | column -t -s $'\t'
+}
+
+# One window as JSON, by con id or title regex; the focused one wins a tie.
+find_window() {
+  local sel="$1" w
+  if [[ "$sel" =~ ^[0-9]+$ ]]; then
+    w="$(tree_windows | jq -c --argjson id "$sel" 'select(.id == $id)')"
+  else
+    w="$(tree_windows | jq -sc --arg re "$sel" \
+      '[.[] | select(.title | test($re))] | sort_by(.focused | not) | .[0] // empty')"
+  fi
+  [[ -n "$w" ]] || return 1
+  printf '%s\n' "$w"
+}
+
+cmd_focus() {
+  local w
+  (($# == 1)) || die "usage: focus ID|REGEX"
+  require
+  load_env
+  w="$(find_window "$1")" || die "no window matches '$1'"
+  swaymsg -q "[con_id=$(jq .id <<<"$w")] focus"
+}
+
+# Closing through sway reaches the app wherever its process runs: a Gradle
+# daemon shared through ~/.gradle may have started it in a sibling container,
+# out of reach of kill/pkill here.
+cmd_close() {
+  local w
+  (($# == 1)) || die "usage: close ID|REGEX"
+  require
+  load_env
+  w="$(find_window "$1")" || die "no window matches '$1'"
+  swaymsg -q "[con_id=$(jq .id <<<"$w")] kill"
+}
+
+cmd_wait_window() {
+  local re="${1:-}" secs="${2:-60}" i w
+  [[ -n "$re" ]] || die "usage: wait-window REGEX [SECONDS]"
+  require
+  load_env
+  for ((i = 0; i < secs * 4; i++)); do
+    if w="$(find_window "$re")"; then
+      # A new window is often resized and re-centred right after it maps.
+      local prev="" next n
+      for ((n = 0; n < 12; n++)); do
+        [[ "$(jq -c .rect <<<"$w")" == "$prev" ]] && break
+        prev="$(jq -c .rect <<<"$w")"
+        sleep 0.25
+        next="$(find_window "$re")" || break
+        w="$next"
+      done
+      jq -r '"\(.id)\t\(.rect.x),\(.rect.y) \(.rect.width)x\(.rect.height)\t\(.title)"' <<<"$w"
+      return 0
+    fi
+    sleep 0.25
+  done
+  die "no window matching '$re' within ${secs}s"
+}
+
+cmd_screenshot() {
+  local file="" win="" w geom
+  while (($#)); do
+    case "$1" in
+      --window) (($# >= 2)) || die "--window needs an ID or REGEX"; win="$2"; shift ;;
+      -*) die "unknown option '$1'" ;;
+      *) file="$1" ;;
+    esac
+    shift
+  done
+  require
+  load_env
+  if [[ -z "$file" ]]; then
+    mkdir -p "$dir/shots"
+    file="$dir/shots/$(date +%Y%m%d-%H%M%S-%N | cut -c1-19).png"
+  fi
+  if [[ -n "$win" ]]; then
+    w="$(find_window "$win")" || die "no window matches '$win'"
+    geom="$(jq -r '.rect | "\(.x),\(.y) \(.width)x\(.height)"' <<<"$w")"
+    grim -g "$geom" "$file"
+    echo "$file (window at ${geom% *}: add that offset to coordinates in this image)"
+  else
+    grim "$file"
+    echo "$file"
+  fi
+}
+
+# Sends commands to inputd; "move" gets the output size appended, "type" its
+# text JSON-encoded so that any character survives the line protocol.
+send_input() {
+  local size
+  require
+  load_env
+  size="$(output_size)"
+  /usr/bin/python3 - "$dir/input.sock" "$size" "$@" <<'PY'
+import json, socket, sys
+path, size, cmds = sys.argv[1], sys.argv[2], sys.argv[3:]
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.connect(path)
+f = s.makefile("rw")
+for c in cmds:
+    if c.startswith("move "):
+        c += " " + size
+    elif c.startswith("type "):
+        c = "type " + json.dumps(c[5:])
+    f.write(c + "\n")
+    f.flush()
+    r = f.readline().strip()
+    if r != "ok":
+        sys.exit(f"ccc-display: {c}: {r or 'no answer'}")
+PY
+}
+
+need_int() {
+  [[ "$1" =~ ^-?[0-9]+$ ]] || die "'$1' is not an integer"
+}
+
+cmd_click() {
+  local x="${1:-}" y="${2:-}" button=left double=0
+  (($# >= 2)) || die "usage: click X Y [left|right|middle] [--double]"
+  need_int "$x"; need_int "$y"
+  shift 2
+  while (($#)); do
+    case "$1" in
+      left|right|middle) button="$1" ;;
+      --double) double=1 ;;
+      *) die "unknown click argument '$1'" ;;
+    esac
+    shift
+  done
+  local -a seq=("move $x $y" "sleep 60" "down $button" "sleep 40" "up $button")
+  if ((double)); then
+    seq+=("sleep 80" "down $button" "sleep 40" "up $button")
+  fi
+  send_input "${seq[@]}"
+}
+
+cmd_move() {
+  (($# == 2)) || die "usage: move X Y"
+  need_int "$1"; need_int "$2"
+  send_input "move $1 $2"
+}
+
+cmd_drag() {
+  local i x y
+  (($# == 4)) || die "usage: drag X1 Y1 X2 Y2"
+  for i in "$@"; do need_int "$i"; done
+  local -a seq=("move $1 $2" "sleep 60" "down left")
+  for ((i = 1; i <= 10; i++)); do
+    x=$(($1 + ($3 - $1) * i / 10))
+    y=$(($2 + ($4 - $2) * i / 10))
+    seq+=("sleep 20" "move $x $y")
+  done
+  seq+=("sleep 60" "up left")
+  send_input "${seq[@]}"
+}
+
+cmd_scroll() {
+  (($# == 3)) || die "usage: scroll X Y N"
+  need_int "$1"; need_int "$2"; need_int "$3"
+  send_input "move $1 $2" "sleep 60" "scroll $3"
+}
+
+focused_shell() {
+  swaymsg -r -t get_tree | jq -r 'recurse(.nodes[]?, .floating_nodes[]?) | select(.focused) | .shell // empty'
+}
+
+cmd_type() {
+  (($# >= 1)) || die "usage: type TEXT"
+  require
+  load_env
+  # XWayland clients mis-read keys from a keymap that changes under them, so
+  # X11 windows get XTEST through xdotool instead of the virtual keyboard.
+  if [[ "$(focused_shell)" == xwayland ]]; then
+    xdotool type --delay 12 -- "$*"
+  else
+    send_input "type $*"
+  fi
+}
+
+cmd_key() {
+  local combo
+  local -a cmds=()
+  (($# >= 1)) || die "usage: key COMBO..."
+  require
+  load_env
+  if [[ "$(focused_shell)" == xwayland ]]; then
+    xdotool key --delay 30 -- "$@"
+    return
+  fi
+  for combo in "$@"; do cmds+=("key $combo"); done
+  send_input "${cmds[@]}"
+}
+
+cmd_run() {
+  (($# >= 1)) || die "usage: run CMD..."
+  require
+  load_env
+  exec "$@"
+}
+
+cmd_launch() {
+  local log
+  (($# >= 1)) || die "usage: launch CMD..."
+  require
+  load_env
+  mkdir -p "$dir/logs"
+  log="$dir/logs/$(basename -- "$1")-$(date +%H%M%S).log"
+  setsid "$@" </dev/null >"$log" 2>&1 &
+  echo "pid $! log $log"
+}
+
+port_busy() {
+  (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
+}
+
+cmd_vnc() {
+  local port
+  require
+  load_env
+  if [[ -f "$dir/vnc.pid" ]] && kill -0 "$(<"$dir/vnc.pid")" 2>/dev/null; then
+    echo "vnc: 127.0.0.1:$(<"$dir/vnc.port")"
+    return
+  fi
+  # Host networking: other sessions and the host itself share these ports.
+  for ((port = 5900; port < 5950; port++)); do
+    port_busy "$port" || break
+  done
+  ((port < 5950)) || die "no free port in 5900-5949"
+  setsid wayvnc 127.0.0.1 "$port" </dev/null >"$dir/vnc.log" 2>&1 &
+  echo $! >"$dir/vnc.pid"
+  echo "$port" >"$dir/vnc.port"
+  wait_for "wayvnc" port_busy "$port"
+  echo "vnc: 127.0.0.1:$port"
+}
+
+case "${1:-help}" in
+  start)        shift; cmd_start "$@" ;;
+  stop)         cmd_stop ;;
+  status)       cmd_status ;;
+  env)          cmd_env ;;
+  run)          shift; cmd_run "$@" ;;
+  launch)       shift; cmd_launch "$@" ;;
+  wait-window)  shift; cmd_wait_window "$@" ;;
+  windows)      cmd_windows ;;
+  focus)        shift; cmd_focus "$@" ;;
+  close)        shift; cmd_close "$@" ;;
+  screenshot)   shift; cmd_screenshot "$@" ;;
+  click)        shift; cmd_click "$@" ;;
+  move)         shift; cmd_move "$@" ;;
+  drag)         shift; cmd_drag "$@" ;;
+  scroll)       shift; cmd_scroll "$@" ;;
+  type)         shift; cmd_type "$@" ;;
+  key)          shift; cmd_key "$@" ;;
+  vnc)          cmd_vnc ;;
+  help|-h|--help) usage ;;
+  *)            usage >&2; exit 1 ;;
+esac
+EOF
+
 # Managed-policy memory: loaded into every claude session in the container,
 # alongside the user's and the project's CLAUDE.md.
 RUN mkdir -p /etc/claude-code && cat > /etc/claude-code/CLAUDE.md <<'EOF'
@@ -579,6 +1305,14 @@ Emulators run on the host, not in this container. `adb`, flutter and the mobile-
 - `ccc-emulator list` shows the host's AVDs; `ccc-emulator start [AVD]` starts one, waits until it has booted and prints its serial; `ccc-emulator stop` / `ccc-emulator status`. `emulator -list-avds`, `emulator -avd AVD` and `flutter emulators --launch AVD` take the same path.
 - The emulator window opens on the user's desktop; use `--headless` only when asked to.
 - If adb cannot reach its daemon, run `ccc-emulator adb-server`. adb here never starts a server of its own.
+
+## GUI apps
+`ccc-display` runs a headless desktop (sway + XWayland) inside the container, so desktop apps (Swing/X11 and native Wayland) can be started, seen and driven here; nothing opens on the user's screen.
+- `ccc-display start`, then `ccc-display launch CMD…` (detached; prints pid and log) and `ccc-display wait-window REGEX`. `ccc-display run CMD…` runs in the foreground; `eval "$(ccc-display env)"` sets up any other shell.
+- `ccc-display screenshot [--window ID|REGEX]` prints a PNG path: Read it to see the screen. The default 1440x900 screen is not downscaled, so image pixels are screen coordinates.
+- `click X Y [right] [--double]`, `drag`, `scroll X Y N`, `type TEXT`, `key ctrl+s Return …`, `windows`, `focus`. `ccc-display -h` for the rest.
+- `ccc-display vnc` serves the screen on 127.0.0.1 if the user wants to watch.
+- Gradle daemons are shared with sibling ccc containers through `~/.gradle` and host networking, so an app started by `./gradlew run` may run in another container yet still show here. kill/pkill here cannot reach it: end it with `ccc-display close`, and check `windows` afterwards.
 EOF
 
 USER ${USERNAME}

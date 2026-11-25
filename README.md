@@ -51,6 +51,7 @@ Paths that don't exist on the host are skipped.
 - Forward `notify-send` to host
 - Wayland clipboard (image paste in claude-code)
 - Chrome for the chrome-devtools MCP starts on first use (needs `socat`)
+- Headless desktop for GUI apps inside the container (`ccc-display`: sway + XWayland, screenshots, mouse/keyboard input, optional VNC on 127.0.0.1)
 - Android emulators run on the host and are started from inside via `ccc-emulator` / `emulator` / `flutter emulators --launch`; mobile-mcp drives them (needs `socat` and an Android SDK with the emulator on the host)
 - Mounts directory at same path in container as it was outside
 - Host network by default, so services on the host's `127.0.0.1` are reachable as `localhost`
